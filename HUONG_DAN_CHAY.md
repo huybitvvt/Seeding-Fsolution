@@ -46,6 +46,15 @@ values (
 );
 ```
 
+File SQL da tu tao san tai khoan test:
+
+```text
+Tai khoan: khachtest
+Mat khau: 123456
+```
+
+Tai khoan test nay chua co cookie Facebook. Neu muon test doc bai/comment Facebook, cap nhat cot `cookie` trong bang `staff_users`.
+
 Nhan su chi can dang nhap bang `username` va `password`. Cookie Facebook do admin dien trong bang `staff_users`.
 
 ## 4. Chay local

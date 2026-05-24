@@ -37,6 +37,16 @@ create table if not exists public.staff_users (
 create unique index if not exists staff_users_username_uidx
     on public.staff_users (username);
 
+insert into public.staff_users (id, name, username, password, role, enabled)
+values ('test-khach', 'Khách Test', 'khachtest', '123456', 'admin', true)
+on conflict (username) do update
+set
+    name = excluded.name,
+    password = excluded.password,
+    role = excluded.role,
+    enabled = excluded.enabled,
+    updated_at = now();
+
 create table if not exists public.seen_posts (
     post_id       text primary key,
     permalink_url text,
