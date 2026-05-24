@@ -144,11 +144,64 @@ def get_staff_user(username: str, table: Optional[str] = None) -> Optional[dict]
     return rows[0] if rows else None
 
 
+def list_staff_users(table: Optional[str] = None) -> list:
+    table_name = table or STAFF_USERS_TABLE
+    r = _request(
+        'GET',
+        f'{table_name}?select=id,name,username,role,cookie,facebook_user_id,'
+        'enabled,created_at,updated_at&enabled=eq.true&order=created_at.asc',
+    )
+    return r.json()
+
+
 def insert_staff_user(row: dict, table: Optional[str] = None) -> dict:
     table_name = table or STAFF_USERS_TABLE
     r = _request('POST', table_name, json=[row], prefer='return=representation')
     rows = r.json()
     return rows[0] if rows else {}
+
+
+def update_staff_user(username: str, row: dict, table: Optional[str] = None) -> dict:
+    table_name = table or STAFF_USERS_TABLE
+    username = (username or '').strip().lower()
+    if not username:
+        return {}
+    r = _request(
+        'PATCH',
+        f'{table_name}?username=eq.{quote(username, safe="")}',
+        json=row,
+        prefer='return=representation',
+    )
+    rows = r.json()
+    return rows[0] if rows else {}
+
+
+def delete_staff_user(staff_id: str = '', username: str = '', table: Optional[str] = None) -> None:
+    table_name = table or STAFF_USERS_TABLE
+    staff_id = (staff_id or '').strip()
+    username = (username or '').strip().lower()
+    if staff_id:
+        r = _request('DELETE', f'{table_name}?id=eq.{quote(staff_id, safe="")}', prefer='return=representation')
+        if r.json():
+            return
+        _request(
+            'PATCH',
+            f'{table_name}?id=eq.{quote(staff_id, safe="")}',
+            json={'enabled': False},
+            prefer='return=minimal',
+        )
+        return
+    if username:
+        r = _request('DELETE', f'{table_name}?username=eq.{quote(username, safe="")}', prefer='return=representation')
+        if r.json():
+            return
+        _request(
+            'PATCH',
+            f'{table_name}?username=eq.{quote(username, safe="")}',
+            json={'enabled': False},
+            prefer='return=minimal',
+        )
+        return
 
 
 # ── seen_posts ──────────────────────────────────────────

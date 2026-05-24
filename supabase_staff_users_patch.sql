@@ -96,6 +96,19 @@ begin
     using (true)
     with check (true);
   end if;
+
+  if not exists (
+    select 1 from pg_policies
+    where schemaname = 'public'
+      and tablename = 'staff_users'
+      and policyname = 'allow anon delete staff users'
+  ) then
+    create policy "allow anon delete staff users"
+    on public.staff_users
+    for delete
+    to anon
+    using (true);
+  end if;
 end $$;
 
 insert into public.staff_users (

@@ -396,6 +396,15 @@ def _load_supabase_staff(username: str) -> tuple[dict, str]:
         return {}, str(e)
 
 
+def _list_supabase_staff() -> tuple[list, str]:
+    if not USE_SUPABASE:
+        return [], ''
+    try:
+        return [_normalize_supabase_staff(row) for row in sb.list_staff_users(SUPABASE_STAFF_TABLE)], ''
+    except Exception as e:
+        return [], str(e)
+
+
 def _set_logged_in_staff(staff: dict) -> None:
     old_token = session.pop('staff_cache_token', None)
     if old_token:
@@ -1725,19 +1734,33 @@ def groups_remove(gid):
 
 @app.route('/api/staff-cookies', methods=['GET'])
 def staff_cookies_get():
+    warning = ''
     if _is_admin():
-        staff_rows = [_public_staff_cookie(item) for item in _staff_accounts()]
+        merged: dict[str, dict] = {}
+        for item in _staff_accounts():
+            key = item.get('id') or item.get('username')
+            if key:
+                merged[key] = item
+        remote_rows, warning = _list_supabase_staff()
+        for item in remote_rows:
+            key = item.get('id') or item.get('username')
+            if key:
+                merged[key] = item
         current = _current_staff()
-        if current and not any(item.get('id') == current.get('id') for item in staff_rows):
-            staff_rows.insert(0, _public_staff_cookie(current))
+        if current:
+            merged[current.get('id') or current.get('username') or 'current'] = current
+        staff_rows = [_public_staff_cookie(item) for item in merged.values()]
     else:
         staff_rows = [_public_current_staff()] if _current_staff() else []
-    return jsonify({
+    payload = {
         'active_staff_id': _current_staff_id(),
         'staff': staff_rows,
         'can_manage': _is_admin(),
         'fallback_cookie': bool(load_cookie()),
-    })
+    }
+    if warning:
+        payload['warning'] = warning
+    return jsonify(payload)
 
 
 @app.route('/api/staff-cookies', methods=['POST'])
@@ -1766,13 +1789,34 @@ def staff_cookies_save():
         return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại'}), 400
     if USE_SUPABASE:
         existing_row, existing_error = _load_supabase_staff(username)
-        if existing_row:
+        if existing_row and _as_enabled(existing_row.get('enabled', True)):
             return jsonify({'ok': False, 'error': 'Tài khoản đăng nhập đã tồn tại trong Supabase'}), 400
         if existing_error and 'Could not find the table' in existing_error:
             return jsonify({'ok': False, 'error': f'Chưa có bảng {SUPABASE_STAFF_TABLE} trong Supabase'}), 500
     now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
     saved_id = uuid.uuid4().hex[:12]
     salt, digest = _hash_password(password)
+    remote_row = {
+        'id': saved_id,
+        'name': name,
+        'username': username,
+        'password': password,
+        'role': 'staff',
+        'cookie': cookie,
+        'facebook_user_id': _extract_cookie_user(cookie),
+        'enabled': True,
+    }
+    if USE_SUPABASE:
+        try:
+            if existing_row and not _as_enabled(existing_row.get('enabled', True)):
+                remote_row['id'] = existing_row.get('id') or saved_id
+                sb.update_staff_user(username, remote_row, SUPABASE_STAFF_TABLE)
+                saved_id = remote_row['id']
+            else:
+                sb.insert_staff_user(remote_row, SUPABASE_STAFF_TABLE)
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'Không lưu được nhân sự lên Supabase: {e}'}), 500
+
     local_row = {
         'id': saved_id,
         'name': name,
@@ -1789,27 +1833,22 @@ def staff_cookies_save():
     if not _staff_cookies.get('active_staff_id'):
         _staff_cookies['active_staff_id'] = saved_id
     _save_staff_cookies()
-    warning = ''
-    if USE_SUPABASE:
-        try:
-            sb.insert_staff_user({
-                'id': saved_id,
-                'name': name,
-                'username': username,
-                'password': password,
-                'role': 'staff',
-                'cookie': cookie,
-                'facebook_user_id': _extract_cookie_user(cookie),
-                'enabled': True,
-            }, SUPABASE_STAFF_TABLE)
-        except Exception as e:
-            warning = f'Supabase chưa ghi được: {e}'
     _invalidate_facebook_cache()
+    merged = {}
+    for item in staff:
+        merged[item.get('id') or item.get('username')] = item
+    remote_rows, warning = _list_supabase_staff()
+    for item in remote_rows:
+        merged[item.get('id') or item.get('username')] = item
+    current = _current_staff()
+    if current:
+        merged[current.get('id') or current.get('username') or 'current'] = current
     return jsonify({
         'ok': True,
         'active_staff_id': _current_staff_id(),
-        'staff': [_public_staff_cookie(item) for item in staff],
+        'staff': [_public_staff_cookie(item) for item in merged.values() if item],
         'can_manage': True,
+        'storage': 'supabase' if USE_SUPABASE else 'local',
         'warning': warning,
     })
 
@@ -1826,6 +1865,12 @@ def staff_cookies_delete(staff_id):
     if staff_id == _current_staff_id():
         return jsonify({'ok': False, 'error': 'Không thể xoá tài khoản đang đăng nhập'}), 400
     staff = _staff_accounts()
+    target = next((item for item in staff if item.get('id') == staff_id), {})
+    if USE_SUPABASE:
+        try:
+            sb.delete_staff_user(staff_id=staff_id, username=target.get('username', ''), table=SUPABASE_STAFF_TABLE)
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'Không xoá được nhân sự trên Supabase: {e}'}), 500
     _staff_cookies['staff'] = [item for item in staff if item.get('id') != staff_id]
     if _staff_cookies.get('active_staff_id') == staff_id:
         _staff_cookies['active_staff_id'] = (_staff_cookies['staff'][0]['id'] if _staff_cookies['staff'] else '')

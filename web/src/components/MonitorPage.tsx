@@ -128,6 +128,7 @@ export function MonitorPage() {
       const d = await r.json();
       setStaffRows(d.staff || []);
       setCanManageStaff(!!d.can_manage);
+      if (d.warning) setStaffStatus(`⚠️ ${d.warning}`);
     } catch {
       setStaffStatus('Không tải được cookie nhân sự');
     }
@@ -912,7 +913,8 @@ export function MonitorPage() {
       if (d.ok) {
         setStaffRows(d.staff || []);
         setCanManageStaff(!!d.can_manage);
-        setStaffStatus('✅ Đã lưu cookie nhân sự');
+        const storageText = d.storage === 'supabase' ? 'Supabase' : 'local';
+        setStaffStatus(`✅ Đã lưu cookie nhân sự (${storageText})${d.warning ? ` · ${d.warning}` : ''}`);
       } else {
         setStaffStatus('❌ ' + (d.error || 'Lỗi lưu cookie'));
       }
