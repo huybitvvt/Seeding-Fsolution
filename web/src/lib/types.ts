@@ -43,6 +43,18 @@ export type StaffAccount = {
   enabled?: boolean;
 };
 
+export type ManagedChannel = {
+  id?: string;
+  platform?: string;
+  channel_name?: string;
+  channel_type?: string;
+  link?: string;
+  target_id?: string;
+  note?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export type BusinessProfile = {
   business_name?: string;
   phone?: string;
@@ -111,4 +123,20 @@ export type StoredPostComment = {
   matched_keywords?: string[];
   is_matched?: boolean;
   fetched_at?: string;
+};
+
+export type CommentLog = {
+  id?: string | number;
+  staff_id?: string;
+  staff_name?: string;
+  staff_username?: string;
+  post_id?: string;
+  group_id?: string;
+  post_url?: string;
+  comment_text?: string;
+  comment_image_url?: string;
+  comment_id?: string;
+  status?: 'success' | 'failed' | string;
+  error_message?: string;
+  created_at?: string;
 };

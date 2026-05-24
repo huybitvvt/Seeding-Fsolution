@@ -36,6 +36,7 @@ STAFF_TOKEN_DIR = os.path.join(DATA_DIR, 'staff_tokens')
 COMMENT_LOGS_FILE = os.path.join(DATA_DIR, 'comment_logs.json')
 COMMENT_SUMMARIES_FILE = os.path.join(DATA_DIR, 'comment_summaries.json')
 POST_COMMENTS_FILE = os.path.join(DATA_DIR, 'post_comments.json')
+MANAGED_CHANNELS_FILE = os.path.join(DATA_DIR, 'managed_channels.json')
 
 BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '')
 DEFAULT_GROUP = os.environ.get('DEFAULT_GROUP', '3809441172650624')
@@ -54,6 +55,7 @@ SUPABASE_COMMENT_LOG_TABLE = os.environ.get('SUPABASE_COMMENT_LOG_TABLE', 'comme
 SUPABASE_COMMENT_SUMMARY_TABLE = os.environ.get('SUPABASE_COMMENT_SUMMARY_TABLE', 'post_comment_summaries')
 SUPABASE_POST_COMMENT_TABLE = os.environ.get('SUPABASE_POST_COMMENT_TABLE', 'post_comments')
 SUPABASE_STAFF_TABLE = os.environ.get('SUPABASE_STAFF_TABLE', 'staff_users')
+SUPABASE_CHANNEL_TABLE = os.environ.get('SUPABASE_CHANNEL_TABLE', 'managed_channels')
 SUPABASE_COMMENT_IMAGE_BUCKET = os.environ.get('SUPABASE_COMMENT_IMAGE_BUCKET', 'comment-images')
 APP_TIMEZONE = os.environ.get('APP_TIMEZONE', 'Asia/Ho_Chi_Minh')
 TIKTOK_COOKIE = os.environ.get('TIKTOK_COOKIE', '')
@@ -96,6 +98,7 @@ _session_staff_cache: dict = {}  # server-only cache for Supabase staff cookies
 _comment_logs: list = []
 _comment_summaries: dict = {}
 _post_comments: list = []
+_managed_channels: list = []
 
 
 def _default_business_profile() -> dict:
@@ -155,7 +158,7 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
 
 
 def _load_state():
-    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments
+    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels
     os.makedirs(DATA_DIR, exist_ok=True)
 
     loaded_from_supabase = False
@@ -167,6 +170,11 @@ def _load_state():
             _settings = sb.kv_get('settings', None) or {'auto_refresh': True, 'interval': 5}
             _ai_config = sb.kv_get('ai_config', None) or _default_ai_config()
             _classifications = sb.list_classifications()
+            try:
+                _managed_channels = sb.list_managed_channels(SUPABASE_CHANNEL_TABLE)
+            except Exception as e:
+                print(f'[supabase] load managed_channels failed, fallback file: {e}')
+                _managed_channels = _read_json(MANAGED_CHANNELS_FILE, [])
             _leads = _read_json(LEADS_FILE, {})
             _reply_suggestions = _read_json(REPLY_SUGGESTIONS_FILE, {})
             loaded_profile = _read_json(BUSINESS_PROFILE_FILE, {})
@@ -187,6 +195,7 @@ def _load_state():
         _settings = _read_json(SETTINGS_FILE, {'auto_refresh': True, 'interval': 5})
         _ai_config = _read_json(AI_CONFIG_FILE, _default_ai_config())
         _classifications = _read_json(CLASSIFICATIONS_FILE, {})
+        _managed_channels = _read_json(MANAGED_CHANNELS_FILE, [])
         _leads = _read_json(LEADS_FILE, {})
         _reply_suggestions = _read_json(REPLY_SUGGESTIONS_FILE, {})
         loaded_profile = _read_json(BUSINESS_PROFILE_FILE, {})
@@ -219,6 +228,8 @@ def _load_state():
     _post_comments = _read_json(POST_COMMENTS_FILE, [])
     if not isinstance(_post_comments, list):
         _post_comments = []
+    if not isinstance(_managed_channels, list):
+        _managed_channels = []
 
 
 def _save_seen(new_posts=None):
@@ -297,6 +308,11 @@ def _save_comment_summaries():
 def _save_post_comments():
     with open(POST_COMMENTS_FILE, 'w', encoding='utf-8') as f:
         json.dump(_post_comments[-5000:], f, ensure_ascii=False)
+
+
+def _save_managed_channels():
+    with open(MANAGED_CHANNELS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(_managed_channels, f, ensure_ascii=False)
 
 
 def _extract_cookie_user(cookie: str) -> str:
@@ -515,6 +531,80 @@ def _clean_business_profile(body: dict) -> dict:
         if key in body:
             current[key] = str(body.get(key) or '').strip()[:limit]
     return current
+
+
+def _extract_target_id_from_link(link: str) -> str:
+    link = (link or '').strip()
+    if not link:
+        return ''
+    patterns = (
+        r'(?:/video/|/videos/)([A-Za-z0-9_.-]+)',
+        r'/groups/([A-Za-z0-9_.-]+)',
+        r'[?&]id=([A-Za-z0-9_.-]+)',
+        r'/channel/([A-Za-z0-9_.-]+)',
+        r'@([A-Za-z0-9_.-]+)',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, link)
+        if match:
+            return match.group(1).strip('/')
+    nums = re.findall(r'\d{6,}', link)
+    return nums[-1] if nums else ''
+
+
+def _normalize_channel_type(value: str) -> str:
+    raw = (value or '').strip().lower()
+    mapping = {
+        'page': 'Page',
+        'fanpage': 'Page',
+        'video': 'Video',
+        'nhom': 'Nhóm',
+        'nhóm': 'Nhóm',
+        'group': 'Nhóm',
+    }
+    return mapping.get(raw, (value or 'Nhóm').strip()[:40])
+
+
+def _clean_managed_channel(body: dict, current: dict | None = None) -> dict:
+    current = current or {}
+    platform = str(body.get('platform', current.get('platform', '')) or '').strip()[:60]
+    channel_name = str(body.get('channel_name', body.get('channel', current.get('channel_name', ''))) or '').strip()[:160]
+    channel_type_value = body.get('channel_type', body.get('type', current.get('channel_type', '')))
+    channel_type = _normalize_channel_type(str(channel_type_value or 'Nhóm'))
+    link = str(body.get('link', current.get('link', '')) or '').strip()[:1000]
+    target_id = str(body.get('target_id', body.get('external_id', current.get('target_id', ''))) or '').strip()[:220]
+    note = str(body.get('note', current.get('note', '')) or '').strip()[:500]
+    if not target_id:
+        target_id = _extract_target_id_from_link(link)
+    return {
+        'platform': platform,
+        'channel_name': channel_name,
+        'channel_type': channel_type,
+        'link': link,
+        'target_id': target_id,
+        'note': note,
+    }
+
+
+def _public_managed_channel(row: dict) -> dict:
+    return {
+        'id': row.get('id', ''),
+        'platform': row.get('platform', ''),
+        'channel_name': row.get('channel_name', ''),
+        'channel_type': row.get('channel_type', ''),
+        'link': row.get('link', ''),
+        'target_id': row.get('target_id', ''),
+        'note': row.get('note', ''),
+        'created_at': row.get('created_at', ''),
+        'updated_at': row.get('updated_at', ''),
+    }
+
+
+def _managed_channel_store_error(exc: Exception) -> str:
+    detail = str(exc)
+    if 'managed_channels' in detail and ('PGRST205' in detail or 'schema cache' in detail or 'Could not find the table' in detail):
+        return 'Supabase chưa có bảng managed_channels. Hãy chạy supabase_managed_channels_patch.sql trong SQL Editor rồi thử lại.'
+    return detail
 
 
 def _save_business_profile():
@@ -1655,6 +1745,107 @@ def api_join_group(gid):
         return jsonify(result)
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+def _sync_group_from_channel(row: dict) -> None:
+    global _groups
+    platform = str(row.get('platform') or '').strip().lower()
+    channel_type = str(row.get('channel_type') or '').strip().lower()
+    target_id = str(row.get('target_id') or '').strip()
+    if platform != 'facebook' or channel_type not in ('nhóm', 'nhom', 'group') or not target_id:
+        return
+    name = str(row.get('channel_name') or '').strip()
+    if not any(g.get('id') == target_id for g in _groups):
+        _groups.append({'id': target_id, 'name': name})
+    else:
+        for group in _groups:
+            if group.get('id') == target_id and name:
+                group['name'] = name
+    _save_groups()
+    if USE_SUPABASE:
+        try:
+            sb.upsert_group(target_id, name)
+        except Exception as e:
+            print(f'[supabase] upsert_group from managed channel failed: {e}')
+
+
+@app.route('/api/channels', methods=['GET'])
+def channels_get():
+    rows = [_public_managed_channel(item) for item in _managed_channels]
+    rows.sort(key=lambda item: item.get('created_at') or item.get('updated_at') or '', reverse=True)
+    return jsonify({'ok': True, 'channels': rows})
+
+
+@app.route('/api/channels', methods=['POST'])
+def channels_create():
+    global _managed_channels
+    body = request.get_json() or {}
+    row = _clean_managed_channel(body)
+    if not row['platform']:
+        return jsonify({'ok': False, 'error': 'Thiếu nền tảng'}), 400
+    if not row['channel_name']:
+        return jsonify({'ok': False, 'error': 'Thiếu tên kênh'}), 400
+    if not row['target_id'] and not row['link']:
+        return jsonify({'ok': False, 'error': 'Thiếu link hoặc ID'}), 400
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    row = {
+        'id': uuid.uuid4().hex[:12],
+        **row,
+        'created_at': now,
+        'updated_at': now,
+    }
+    if USE_SUPABASE:
+        try:
+            row = {**row, **sb.upsert_managed_channel(row, SUPABASE_CHANNEL_TABLE)}
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'Không lưu được kênh lên Supabase: {_managed_channel_store_error(e)}'}), 500
+    _managed_channels = [item for item in _managed_channels if item.get('id') != row['id']]
+    _managed_channels.append(row)
+    _save_managed_channels()
+    _sync_group_from_channel(row)
+    return jsonify({'ok': True, 'channel': _public_managed_channel(row), 'channels': [_public_managed_channel(item) for item in _managed_channels]})
+
+
+@app.route('/api/channels/<channel_id>', methods=['PUT'])
+def channels_update(channel_id):
+    global _managed_channels
+    current = next((item for item in _managed_channels if item.get('id') == channel_id), {})
+    if not current and USE_SUPABASE:
+        try:
+            remote = sb.list_managed_channels(SUPABASE_CHANNEL_TABLE)
+            current = next((item for item in remote if item.get('id') == channel_id), {})
+        except Exception:
+            current = {}
+    if not current:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy kênh'}), 404
+    body = request.get_json() or {}
+    row = {**current, **_clean_managed_channel(body, current), 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}
+    if not row.get('platform') or not row.get('channel_name'):
+        return jsonify({'ok': False, 'error': 'Thiếu nền tảng hoặc tên kênh'}), 400
+    if USE_SUPABASE:
+        try:
+            row = {**row, **sb.update_managed_channel(channel_id, row, SUPABASE_CHANNEL_TABLE)}
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'Không cập nhật được kênh trên Supabase: {_managed_channel_store_error(e)}'}), 500
+    _managed_channels = [row if item.get('id') == channel_id else item for item in _managed_channels]
+    if not any(item.get('id') == channel_id for item in _managed_channels):
+        _managed_channels.append(row)
+    _save_managed_channels()
+    _sync_group_from_channel(row)
+    return jsonify({'ok': True, 'channel': _public_managed_channel(row), 'channels': [_public_managed_channel(item) for item in _managed_channels]})
+
+
+@app.route('/api/channels/<channel_id>', methods=['DELETE'])
+def channels_delete(channel_id):
+    global _managed_channels
+    if USE_SUPABASE:
+        try:
+            sb.delete_managed_channel(channel_id, SUPABASE_CHANNEL_TABLE)
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'Không xoá được kênh trên Supabase: {_managed_channel_store_error(e)}'}), 500
+    _managed_channels = [item for item in _managed_channels if item.get('id') != channel_id]
+    _save_managed_channels()
+    return jsonify({'ok': True, 'channels': [_public_managed_channel(item) for item in _managed_channels]})
 
 
 @app.route('/api/telegram/chatids', methods=['GET'])

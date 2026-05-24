@@ -17,6 +17,7 @@ Copy `.env.example` thanh `.env`, sau do dien:
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_PUBLISHABLE_KEY=your_supabase_publishable_key
 SUPABASE_STAFF_TABLE=staff_users
+SUPABASE_CHANNEL_TABLE=managed_channels
 SIMPLE_LOGIN_ONLY=true
 WEB_UI_URL=http://localhost:3000
 APP_SECRET_KEY=doi_chuoi_nay_thanh_chuoi_dai_ngau_nhien
@@ -30,6 +31,12 @@ Vao Supabase Dashboard -> SQL Editor, chay file:
 
 ```text
 supabase_ai_reply_suggestions.sql
+```
+
+Neu da tung chay SQL truoc do va chi muon bo sung bang kenh/group moi, chay them file:
+
+```text
+supabase_managed_channels_patch.sql
 ```
 
 Sau do them tai khoan dang nhap vao bang `staff_users`:
@@ -80,4 +87,9 @@ http://localhost:3000
 
 - Neu hien `Vui long dang nhap`: dang nhap lai bang tai khoan trong bang `staff_users`.
 - Neu bao chua co bang `staff_users`: chay lai file SQL trong Supabase.
+- Neu bao chua co bang `managed_channels`: chay `supabase_managed_channels_patch.sql`, doi vai giay roi tai lai trang.
 - Neu Facebook bao cookie het han: cap nhat cot `cookie` cua nhan su trong bang `staff_users`.
+
+## 6. Deploy
+
+Frontend Next.js co the deploy len Vercel. Backend Flask (`app.py`) van can mot noi chay rieng nhu VPS/Render/Railway, sau do dat `WEB_UI_URL` va CORS dung domain frontend.

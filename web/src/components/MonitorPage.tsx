@@ -2,10 +2,14 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AuthPanel } from '@/components/AuthPanel';
+import { ChannelManagerPanel } from '@/components/ChannelManagerPanel';
+import { ConsoleHome } from '@/components/ConsoleHome';
+import { HistoryPanel } from '@/components/HistoryPanel';
+import { LeadManagerPanel } from '@/components/LeadManagerPanel';
 import { PostCard } from '@/components/PostCard';
 import { SaleSetupPanel } from '@/components/SaleSetupPanel';
 import { api } from '@/lib/api';
-import type { CommentSummary, FbPage, FbPost, GroupRow, Lead, ReplySuggestion, StaffAccount, StoredPostComment } from '@/lib/types';
+import type { CommentLog, CommentSummary, FbPage, FbPost, GroupRow, Lead, ManagedChannel, ReplySuggestion, StaffAccount, StoredPostComment } from '@/lib/types';
 import { extractSlug } from '@/lib/utils';
 
 type AiProviders = Record<string, { default_model?: string }>;
@@ -17,6 +21,7 @@ type AiConfig = {
 };
 
 type JoinPrompt = { id: string; name: string };
+type ViewKey = 'home' | 'staff' | 'channels' | 'manage' | 'cookies' | 'history' | 'leads';
 
 export function MonitorPage() {
   const [groups, setGroups] = useState<string[]>([]);
@@ -48,6 +53,12 @@ export function MonitorPage() {
   const [staffRows, setStaffRows] = useState<StaffAccount[]>([]);
   const [canManageStaff, setCanManageStaff] = useState(false);
   const [staffStatus, setStaffStatus] = useState('');
+  const [activeView, setActiveView] = useState<ViewKey>('home');
+  const [channels, setChannels] = useState<ManagedChannel[]>([]);
+  const [channelStatus, setChannelStatus] = useState('');
+  const [channelBusy, setChannelBusy] = useState(false);
+  const [commentLogs, setCommentLogs] = useState<CommentLog[]>([]);
+  const [historyStatus, setHistoryStatus] = useState('');
   const [todayCommentCount, setTodayCommentCount] = useState<number | null>(null);
 
   const [limit, setLimit] = useState(10);
@@ -131,6 +142,91 @@ export function MonitorPage() {
       if (d.warning) setStaffStatus(`⚠️ ${d.warning}`);
     } catch {
       setStaffStatus('Không tải được cookie nhân sự');
+    }
+  }, []);
+
+  const loadChannels = useCallback(async () => {
+    try {
+      const r = await api('/api/channels');
+      const d = await r.json();
+      if (d.ok) {
+        setChannels(d.channels || []);
+        setChannelStatus('');
+      } else {
+        setChannelStatus('❌ ' + (d.error || 'Không tải được danh sách kênh'));
+      }
+    } catch {
+      setChannelStatus('❌ Lỗi kết nối khi tải kênh');
+    }
+  }, []);
+
+  const saveChannel = useCallback(async (payload: {
+    platform: string;
+    channel_name: string;
+    channel_type: string;
+    link: string;
+    target_id: string;
+    note: string;
+  }, id?: string) => {
+    if (!payload.platform.trim() || !payload.channel_name.trim()) {
+      setChannelStatus('Nhập đủ nền tảng và tên kênh');
+      return false;
+    }
+    setChannelBusy(true);
+    setChannelStatus(id ? 'Đang cập nhật kênh...' : 'Đang thêm kênh...');
+    try {
+      const r = await api(id ? `/api/channels/${id}` : '/api/channels', {
+        method: id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setChannels(d.channels || []);
+        setChannelStatus(id ? '✅ Đã cập nhật kênh' : '✅ Đã thêm kênh');
+        const saved = d.channel || payload;
+        if ((saved.platform || '').toLowerCase() === 'facebook' && ['Nhóm', 'Nhom', 'Group'].includes(saved.channel_type || '') && saved.target_id) {
+          setGroups((prev) => (prev.includes(saved.target_id) ? prev : [...prev, saved.target_id]));
+          setGroupNames((prev) => ({ ...prev, [saved.target_id]: saved.channel_name || saved.target_id }));
+        }
+        return true;
+      }
+      setChannelStatus('❌ ' + (d.error || 'Không lưu được kênh'));
+      return false;
+    } catch {
+      setChannelStatus('❌ Lỗi kết nối khi lưu kênh');
+      return false;
+    } finally {
+      setChannelBusy(false);
+    }
+  }, []);
+
+  const deleteChannel = useCallback(async (id: string) => {
+    if (!confirm('Xoá kênh này?')) return;
+    setChannelStatus('Đang xoá kênh...');
+    try {
+      const r = await api(`/api/channels/${id}`, { method: 'DELETE' });
+      const d = await r.json();
+      if (d.ok) {
+        setChannels(d.channels || []);
+        setChannelStatus('✅ Đã xoá kênh');
+      } else {
+        setChannelStatus('❌ ' + (d.error || 'Không xoá được kênh'));
+      }
+    } catch {
+      setChannelStatus('❌ Lỗi kết nối khi xoá kênh');
+    }
+  }, []);
+
+  const loadCommentLogs = useCallback(async () => {
+    setHistoryStatus('Đang tải lịch sử...');
+    try {
+      const r = await api('/api/comment-logs');
+      const d = await r.json();
+      setCommentLogs(Array.isArray(d) ? d.reverse() : []);
+      setHistoryStatus('');
+    } catch {
+      setHistoryStatus('Không tải được lịch sử thao tác');
     }
   }, []);
 
@@ -324,6 +420,7 @@ export function MonitorPage() {
       await loadTg();
       await loadPages();
       await loadStaffCookies();
+      await loadChannels();
       await loadTodayCommentStats();
 
       const posts = await loadPosts();
@@ -347,7 +444,7 @@ export function MonitorPage() {
     return () => {
       cancelled = true;
     };
-  }, [authChecked, authenticated, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTodayCommentStats]);
+  }, [authChecked, authenticated, loadChannels, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTodayCommentStats]);
 
   useEffect(() => {
     if (autoTimerRef.current) {
@@ -945,6 +1042,21 @@ export function MonitorPage() {
   const hasKey = Boolean(masked && masked !== '***' && masked.length > 3);
   const fbMatchedRows = fbCommentRows.filter((row) => row.is_matched);
   const tiktokMatchedRows = tiktokRows.filter((row) => row.is_matched);
+  const navItems: { key: ViewKey; icon: string; label: string }[] = [
+    { key: 'home', icon: '⌂', label: 'Trang chủ' },
+    { key: 'staff', icon: '👥', label: 'Nhân sự' },
+    { key: 'channels', icon: '📋', label: 'Quản lý nhóm' },
+    { key: 'manage', icon: '☑', label: 'Quản lý' },
+    { key: 'cookies', icon: '🍪', label: 'Cooki' },
+    { key: 'history', icon: '🗓', label: 'Lịch thử thao tác' },
+    { key: 'leads', icon: '◎', label: 'Lead' },
+  ];
+
+  useEffect(() => {
+    if (!authenticated) return;
+    if (activeView === 'history') void loadCommentLogs();
+    if (activeView === 'channels') void loadChannels();
+  }, [activeView, authenticated, loadChannels, loadCommentLogs]);
 
   if (!authChecked) {
     return (
@@ -975,23 +1087,87 @@ export function MonitorPage() {
 
   return (
     <>
-      <div className="header">
-        <img className="header-logo" src="/st-real-logo.jpg" alt="ST.Real" />
-        <div>
-          <div className="header-title">ST.Real Social Console</div>
-          <div className="header-sub" title={groups.length === 1 ? `ID: ${groups[0]}` : ''}>
-            {headerSub}
-          </div>
-        </div>
-        <div className="header-spacer" />
-        <div className="header-user">
-          {currentStaff?.name || currentStaff?.username} · {currentStaff?.role === 'admin' ? 'admin' : 'nhân sự'}
-        </div>
-        <button type="button" className="header-logout" onClick={() => void logout()}>
-          Đăng xuất
-        </button>
-      </div>
+      <div className="console-shell">
+        <aside className="console-rail">
+          <img className="console-logo" src="/st-real-logo.jpg" alt="ST.Real" />
+          {navItems.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={`rail-button${activeView === item.key ? ' active' : ''}`}
+              title={item.label}
+              onClick={() => setActiveView(item.key)}
+            >
+              <span>{item.icon}</span>
+            </button>
+          ))}
+        </aside>
 
+        <main className="console-content">
+          <div className="console-topbar">
+            <button type="button" className="rail-collapse" title="Menu">
+              ☰
+            </button>
+            <div>
+              <div className="console-page-title">{navItems.find((item) => item.key === activeView)?.label || 'Trang chủ'}</div>
+              <div className="console-page-sub" title={groups.length === 1 ? `ID: ${groups[0]}` : ''}>
+                {activeView === 'manage' ? headerSub : 'ST.Real Social Console'}
+              </div>
+            </div>
+            <div className="header-spacer" />
+            <div className="console-clock">{new Date().toLocaleDateString('vi-VN')}</div>
+            <div className="header-user">
+              {currentStaff?.name || currentStaff?.username} · {currentStaff?.role === 'admin' ? 'admin' : 'nhân sự'}
+            </div>
+            <button type="button" className="header-logout" onClick={() => void logout()}>
+              Đăng xuất
+            </button>
+          </div>
+
+          {activeView === 'home' ? <ConsoleHome staffName={currentStaff?.name || currentStaff?.username} onOpen={setActiveView} /> : null}
+          {activeView === 'channels' ? (
+            <ChannelManagerPanel
+              channels={channels}
+              status={channelStatus}
+              busy={channelBusy}
+              onSave={saveChannel}
+              onDelete={deleteChannel}
+              onReload={loadChannels}
+            />
+          ) : null}
+          {activeView === 'history' ? <HistoryPanel rows={commentLogs} status={historyStatus} onReload={loadCommentLogs} /> : null}
+          {activeView === 'leads' ? <LeadManagerPanel leads={leads} onExtract={extractLeadsAll} /> : null}
+          {activeView === 'staff' || activeView === 'cookies' ? (
+            <div className="settings-module">
+              <SaleSetupPanel
+                aiProvider={aiProvider}
+                onProviderChange={(v) => {
+                  setAiProvider(v);
+                  void onProviderChange(v);
+                }}
+                aiAutoClassify={aiAutoClassify}
+                onAutoClassifyChange={(v) => void saveAiAuto(v)}
+                aiStatus={aiStatus}
+                maskedKey={masked}
+                hasKey={hasKey}
+                aiKeyEdit={aiKeyEdit}
+                aiKeyInput={aiKeyInput}
+                onAiKeyInput={setAiKeyInput}
+                onToggleKeyEdit={() => setAiKeyEdit((e) => !e)}
+                onTestAi={testAi}
+                onSaveKey={saveAiKey}
+                onDeleteKey={deleteAiKey}
+                staff={staffRows}
+                currentStaff={currentStaff}
+                canManageStaff={canManageStaff}
+                staffStatus={staffStatus}
+                onAddStaff={addStaffCookie}
+                onDeleteStaff={deleteStaffCookie}
+              />
+            </div>
+          ) : null}
+
+      {activeView === 'manage' ? (
       <div className="workspace">
         <aside className="workspace-sidebar">
         <div className="panel">
@@ -1245,6 +1421,9 @@ export function MonitorPage() {
           )}
         </div>
         </div>
+      </div>
+      ) : null}
+        </main>
       </div>
 
       <div className={`modal-overlay${postModal ? ' open' : ''}`} onClick={(e) => e.target === e.currentTarget && setPostModal(false)} role="presentation">

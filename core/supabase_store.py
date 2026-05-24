@@ -32,6 +32,7 @@ SUPABASE_KEY = (
     or ''
 )
 STAFF_USERS_TABLE = os.environ.get('SUPABASE_STAFF_TABLE', 'staff_users')
+MANAGED_CHANNEL_TABLE = os.environ.get('SUPABASE_CHANNEL_TABLE', 'managed_channels')
 
 _TIMEOUT = 30
 
@@ -202,6 +203,46 @@ def delete_staff_user(staff_id: str = '', username: str = '', table: Optional[st
             prefer='return=minimal',
         )
         return
+
+
+# ── managed_channels ───────────────────────────────────
+def list_managed_channels(table: Optional[str] = None) -> list:
+    table_name = table or MANAGED_CHANNEL_TABLE
+    r = _request(
+        'GET',
+        f'{table_name}?select=id,platform,channel_name,channel_type,link,target_id,'
+        'note,created_at,updated_at&order=created_at.desc',
+    )
+    return r.json()
+
+
+def upsert_managed_channel(row: dict, table: Optional[str] = None) -> dict:
+    table_name = table or MANAGED_CHANNEL_TABLE
+    r = _request(
+        'POST',
+        table_name,
+        json=[row],
+        prefer='resolution=merge-duplicates,return=representation',
+    )
+    rows = r.json()
+    return rows[0] if rows else {}
+
+
+def update_managed_channel(channel_id: str, row: dict, table: Optional[str] = None) -> dict:
+    table_name = table or MANAGED_CHANNEL_TABLE
+    r = _request(
+        'PATCH',
+        f'{table_name}?id=eq.{quote(channel_id or "", safe="")}',
+        json=row,
+        prefer='return=representation',
+    )
+    rows = r.json()
+    return rows[0] if rows else {}
+
+
+def delete_managed_channel(channel_id: str, table: Optional[str] = None) -> None:
+    table_name = table or MANAGED_CHANNEL_TABLE
+    _request('DELETE', f'{table_name}?id=eq.{quote(channel_id or "", safe="")}', prefer='return=minimal')
 
 
 # ── seen_posts ──────────────────────────────────────────

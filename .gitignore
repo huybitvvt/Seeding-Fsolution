@@ -13,4 +13,5 @@ data/comment_logs.json
 data/comment_summaries.json
 data/post_comments.json
 data/inboxed_posts.json
+data/managed_channels.json
 *.log

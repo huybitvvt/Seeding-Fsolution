@@ -47,6 +47,18 @@ set
     enabled = excluded.enabled,
     updated_at = now();
 
+create table if not exists public.managed_channels (
+    id           text primary key,
+    platform     text not null,
+    channel_name text not null,
+    channel_type text not null,
+    link         text,
+    target_id    text,
+    note         text,
+    created_at   timestamptz not null default now(),
+    updated_at   timestamptz not null default now()
+);
+
 create table if not exists public.seen_posts (
     post_id       text primary key,
     permalink_url text,
@@ -81,5 +93,8 @@ alter table public.groups            disable row level security;
 alter table public.telegram_chat_ids disable row level security;
 alter table public.app_kv            disable row level security;
 alter table public.staff_users       disable row level security;
+alter table public.managed_channels  disable row level security;
 alter table public.seen_posts        disable row level security;
 alter table public.classifications   disable row level security;
+
+select pg_notify('pgrst', 'reload schema');
