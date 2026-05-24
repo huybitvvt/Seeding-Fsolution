@@ -73,13 +73,14 @@ export function AuthPanel({ mode, status, onLogin, onSetup }: Props) {
           <div className="auth-title">{isSetup ? 'Setup tài khoản đầu tiên' : 'Đăng nhập'}</div>
           <div className="auth-sub">
             {isSetup
-              ? 'Tài khoản đầu tiên là admin. Sau đó admin thêm nhân sự và gắn cookie Facebook riêng cho từng người.'
+              ? 'Chỉ admin khởi tạo hệ thống. Sau khi đăng nhập, admin sẽ thêm nhân sự và gắn cookie Facebook riêng cho từng người.'
               : 'Mỗi nhân sự dùng tài khoản riêng. Cookie Facebook sẽ tự gắn theo tài khoản đăng nhập.'}
           </div>
+          {isSetup ? <div className="auth-admin-note">Nhân sự không tự tạo tài khoản tại bước này.</div> : null}
           {isSetup ? (
             <div className="auth-field">
-              <label>Tên nhân sự</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ví dụ: Sale A" autoComplete="name" />
+              <label>Tên quản trị viên</label>
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Ví dụ: Admin ST.Real" autoComplete="name" />
             </div>
           ) : null}
           <div className="auth-field">
@@ -105,7 +106,7 @@ export function AuthPanel({ mode, status, onLogin, onSetup }: Props) {
           {status ? <div className="auth-status">{status}</div> : null}
           <div className="auth-actions">
             <button type="submit" className="auth-submit" disabled={submitting}>
-              {submitting ? 'Đang xử lý...' : isSetup ? 'Tạo admin' : 'Đăng nhập'}
+              {submitting ? 'Đang xử lý...' : isSetup ? 'Tạo tài khoản admin' : 'Đăng nhập'}
             </button>
           </div>
         </form>

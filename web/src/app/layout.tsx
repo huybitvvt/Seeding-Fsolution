@@ -1,10 +1,18 @@
 import type { Metadata } from 'next';
+import { Roboto } from 'next/font/google';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'FB Group Monitor',
-  description: 'Theo dõi bài viết nhóm Facebook',
+  title: 'ST.Real Social Console',
+  description: 'Theo dõi bài viết, lọc bình luận và quản lý sale đa kênh',
 };
+
+const roboto = Roboto({
+  subsets: ['latin', 'vietnamese'],
+  weight: ['400', '500', '700', '900'],
+  display: 'swap',
+  variable: '--font-roboto',
+});
 
 export default function RootLayout({
   children,
@@ -13,7 +21,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="vi">
-      <body>{children}</body>
+      <body className={roboto.variable}>{children}</body>
     </html>
   );
 }
