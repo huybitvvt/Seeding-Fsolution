@@ -38,6 +38,7 @@ COMMENT_LOGS_FILE = os.path.join(DATA_DIR, 'comment_logs.json')
 COMMENT_SUMMARIES_FILE = os.path.join(DATA_DIR, 'comment_summaries.json')
 POST_COMMENTS_FILE = os.path.join(DATA_DIR, 'post_comments.json')
 MANAGED_CHANNELS_FILE = os.path.join(DATA_DIR, 'managed_channels.json')
+TIKTOK_CONFIG_FILE = os.path.join(DATA_DIR, 'tiktok_config.json')
 
 BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '')
 DEFAULT_GROUP = os.environ.get('DEFAULT_GROUP', '3809441172650624')
@@ -100,6 +101,7 @@ _comment_logs: list = []
 _comment_summaries: dict = {}
 _post_comments: list = []
 _managed_channels: list = []
+_tiktok_config: dict = {}
 
 
 def _default_business_profile() -> dict:
@@ -145,6 +147,10 @@ def _default_staff_cookies() -> dict:
     return {'active_staff_id': '', 'staff': []}
 
 
+def _default_tiktok_config() -> dict:
+    return {'cookie': '', 'updated_at': '', 'updated_by': ''}
+
+
 def _hash_password(password: str, salt: str = None) -> tuple[str, str]:
     salt = salt or secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 120000)
@@ -159,7 +165,7 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
 
 
 def _load_state():
-    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels
+    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
     except OSError as e:
@@ -177,6 +183,7 @@ def _load_state():
             _groups = sb.list_groups() or [{'id': DEFAULT_GROUP, 'name': ''}]
             _settings = sb.kv_get('settings', None) or {'auto_refresh': True, 'interval': 5}
             _ai_config = sb.kv_get('ai_config', None) or _default_ai_config()
+            _tiktok_config = {**_default_tiktok_config(), **(sb.kv_get('tiktok_config', None) or {})}
             _classifications = sb.list_classifications()
             try:
                 _managed_channels = sb.list_managed_channels(SUPABASE_CHANNEL_TABLE)
@@ -202,6 +209,7 @@ def _load_state():
         _groups = _read_json(GROUPS_FILE, [{'id': DEFAULT_GROUP, 'name': ''}])
         _settings = _read_json(SETTINGS_FILE, {'auto_refresh': True, 'interval': 5})
         _ai_config = _read_json(AI_CONFIG_FILE, _default_ai_config())
+        _tiktok_config = {**_default_tiktok_config(), **_read_json(TIKTOK_CONFIG_FILE, {})}
         _classifications = _read_json(CLASSIFICATIONS_FILE, {})
         _managed_channels = _read_json(MANAGED_CHANNELS_FILE, [])
         _leads = _read_json(LEADS_FILE, {})
@@ -238,6 +246,8 @@ def _load_state():
         _post_comments = []
     if not isinstance(_managed_channels, list):
         _managed_channels = []
+    if not isinstance(_tiktok_config, dict):
+        _tiktok_config = _default_tiktok_config()
 
 
 def _save_seen(new_posts=None):
@@ -277,6 +287,15 @@ def _save_ai_config():
             sb.kv_set('ai_config', _ai_config)
         except Exception as e:
             print(f'[supabase] save_ai_config failed: {e}')
+
+
+def _save_tiktok_config():
+    _write_json(TIKTOK_CONFIG_FILE, _tiktok_config)
+    if USE_SUPABASE:
+        try:
+            sb.kv_set('tiktok_config', _tiktok_config)
+        except Exception as e:
+            print(f'[supabase] save_tiktok_config failed: {e}')
 
 
 def _save_classifications(new_items=None):
@@ -333,6 +352,33 @@ def _mask_cookie(cookie: str) -> str:
     if c_user:
         return f'c_user={c_user}; ...'
     return cookie[:8] + '...' + cookie[-6:] if len(cookie) > 18 else '***'
+
+
+def _mask_tiktok_cookie(cookie: str) -> str:
+    if not cookie:
+        return ''
+    for key in ('sessionid', 'sid_tt', 'tt_csrf_token', 'msToken'):
+        value = _extract_cookie_value(cookie, key)
+        if value:
+            return f'{key}={value[:6]}...{value[-4:]}' if len(value) > 12 else f'{key}=***'
+    return cookie[:10] + '...' + cookie[-6:] if len(cookie) > 20 else '***'
+
+
+def _configured_tiktok_cookie() -> str:
+    return str((_tiktok_config or {}).get('cookie') or TIKTOK_COOKIE or '').strip()
+
+
+def _public_tiktok_config() -> dict:
+    cookie = _configured_tiktok_cookie()
+    source = 'web' if str((_tiktok_config or {}).get('cookie') or '').strip() else ('env' if TIKTOK_COOKIE else '')
+    return {
+        'has_cookie': bool(cookie),
+        'cookie_masked': _mask_tiktok_cookie(cookie),
+        'source': source,
+        'updated_at': (_tiktok_config or {}).get('updated_at') or '',
+        'updated_by': (_tiktok_config or {}).get('updated_by') or '',
+        'can_manage': _is_admin(),
+    }
 
 
 def _public_staff_cookie(row: dict) -> dict:
@@ -1079,7 +1125,7 @@ def _fetch_tiktok_comments(video_id: str, limit: int = 300, cookie: str = '') ->
         'Referer': f'https://www.tiktok.com/@/video/{video_id}',
         'Origin': 'https://www.tiktok.com',
     }
-    merged_cookie = (cookie or TIKTOK_COOKIE or '').strip()
+    merged_cookie = (cookie or _configured_tiktok_cookie()).strip()
     if merged_cookie:
         headers['Cookie'] = merged_cookie
 
@@ -1089,7 +1135,7 @@ def _fetch_tiktok_comments(video_id: str, limit: int = 300, cookie: str = '') ->
         except Exception as e:
             return {}, f'Lỗi kết nối TikTok: {str(e)[:180]}'
         if resp.status_code in (401, 403):
-            return {}, 'TikTok đang chặn request. Hãy thêm TIKTOK_COOKIE trong .env rồi chạy lại.'
+            return {}, 'TikTok đang chặn request. Hãy cập nhật TikTok cookie trong menu Cooki rồi chạy lại.'
         if resp.status_code != 200:
             return {}, f'TikTok trả lỗi {resp.status_code}: {resp.text[:160]}'
         try:
@@ -1295,9 +1341,9 @@ def _send_tiktok_comment(video_id: str, video_url: str, message: str, cookie: st
     message = (message or '').strip()
     if not message:
         return {}, 'Nhập nội dung bình luận TikTok'
-    merged_cookie = (cookie or TIKTOK_COOKIE or _current_staff().get('cookie') or '').strip()
+    merged_cookie = (cookie or _configured_tiktok_cookie() or _current_staff().get('cookie') or '').strip()
     if not merged_cookie:
-        return {}, 'Thiếu cookie TikTok/Facebook của nhân sự. Admin cần gắn cookie tài khoản đang đăng nhập TikTok.'
+        return {}, 'Thiếu cookie TikTok. Admin cần nhập TikTok cookie trong menu Cooki.'
 
     csrf = (
         _extract_cookie_value(merged_cookie, 'tt_csrf_token')
@@ -2065,6 +2111,47 @@ def tiktok_comment_stats():
     if warning:
         payload['warning'] = warning
     return jsonify(payload)
+
+
+@app.route('/api/tiktok/config', methods=['GET'])
+def tiktok_config_get():
+    return jsonify({'ok': True, 'config': _public_tiktok_config()})
+
+
+@app.route('/api/tiktok/config', methods=['POST'])
+def tiktok_config_save():
+    global _tiktok_config
+    if not _is_admin():
+        return jsonify({'ok': False, 'error': 'Chỉ admin được cập nhật TikTok cookie'}), 403
+    body = request.get_json() or {}
+    cookie = str(body.get('cookie') or '').strip()
+    if not cookie:
+        return jsonify({'ok': False, 'error': 'Dán cookie TikTok trước khi lưu'}), 400
+    if '=' not in cookie or ';' not in cookie:
+        return jsonify({'ok': False, 'error': 'Cookie TikTok chưa đúng định dạng, cần chuỗi cookie đầy đủ từ trình duyệt'}), 400
+    if not any(token in cookie for token in ('sessionid=', 'sid_tt=', 'ttwid=', 'msToken=', 'tt_csrf_token=')):
+        return jsonify({'ok': False, 'error': 'Cookie chưa giống TikTok cookie. Kiểm tra lại cookie từ tiktok.com'}), 400
+    now = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    staff = _current_staff()
+    _tiktok_config = {
+        **_default_tiktok_config(),
+        **(_tiktok_config if isinstance(_tiktok_config, dict) else {}),
+        'cookie': cookie,
+        'updated_at': now,
+        'updated_by': staff.get('name') or staff.get('username') or '',
+    }
+    _save_tiktok_config()
+    return jsonify({'ok': True, 'config': _public_tiktok_config(), 'storage': 'supabase' if USE_SUPABASE else 'local'})
+
+
+@app.route('/api/tiktok/config', methods=['DELETE'])
+def tiktok_config_delete():
+    global _tiktok_config
+    if not _is_admin():
+        return jsonify({'ok': False, 'error': 'Chỉ admin được xoá TikTok cookie'}), 403
+    _tiktok_config = {**_default_tiktok_config(), 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}
+    _save_tiktok_config()
+    return jsonify({'ok': True, 'config': _public_tiktok_config(), 'storage': 'supabase' if USE_SUPABASE else 'local'})
 
 
 @app.route('/api/groups/resolve')

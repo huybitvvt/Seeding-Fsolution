@@ -35,6 +35,14 @@ type AiConfig = {
 
 type JoinPrompt = { id: string; name: string };
 type ViewKey = 'home' | 'staff' | 'channels' | 'manage' | 'cookies' | 'history' | 'leads';
+type TikTokCookieConfig = {
+  has_cookie?: boolean;
+  cookie_masked?: string;
+  source?: string;
+  updated_at?: string;
+  updated_by?: string;
+  can_manage?: boolean;
+};
 
 export function MonitorPage() {
   const [groups, setGroups] = useState<string[]>([]);
@@ -120,6 +128,10 @@ export function MonitorPage() {
   const [tiktokCommentText, setTiktokCommentText] = useState('');
   const [tiktokCommentStatus, setTiktokCommentStatus] = useState('');
   const [tiktokCommentBusy, setTiktokCommentBusy] = useState(false);
+  const [tiktokCookieConfig, setTiktokCookieConfig] = useState<TikTokCookieConfig>({});
+  const [tiktokCookieInput, setTiktokCookieInput] = useState('');
+  const [tiktokCookieStatus, setTiktokCookieStatus] = useState('');
+  const [tiktokCookieBusy, setTiktokCookieBusy] = useState(false);
 
   const [lightbox, setLightbox] = useState<string | null>(null);
   const [classifyBusy, setClassifyBusy] = useState(false);
@@ -166,6 +178,21 @@ export function MonitorPage() {
       if (d.warning) setStaffStatus(`⚠️ ${d.warning}`);
     } catch {
       setStaffStatus('Không tải được cookie nhân sự');
+    }
+  }, []);
+
+  const loadTiktokCookieConfig = useCallback(async () => {
+    try {
+      const r = await api('/api/tiktok/config');
+      const d = await r.json();
+      if (d.ok) {
+        setTiktokCookieConfig(d.config || {});
+        setTiktokCookieStatus('');
+      } else {
+        setTiktokCookieStatus('Không tải được TikTok cookie');
+      }
+    } catch {
+      setTiktokCookieStatus('Không kết nối được backend khi tải TikTok cookie');
     }
   }, []);
 
@@ -444,6 +471,7 @@ export function MonitorPage() {
       await loadTg();
       await loadPages();
       await loadStaffCookies();
+      await loadTiktokCookieConfig();
       await loadChannels();
       await loadTodayCommentStats();
 
@@ -468,7 +496,7 @@ export function MonitorPage() {
     return () => {
       cancelled = true;
     };
-  }, [authChecked, authenticated, loadChannels, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTodayCommentStats]);
+  }, [authChecked, authenticated, loadChannels, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTiktokCookieConfig, loadTodayCommentStats]);
 
   useEffect(() => {
     if (autoTimerRef.current) {
@@ -839,6 +867,7 @@ export function MonitorPage() {
         setTiktokCommentText('');
         setTiktokCommentStatus(`Đã gửi bình luận TikTok${d.warning ? ` · ${d.warning}` : ''}`);
         await loadTiktokStats(d.post_id || selectedTiktokStat.post_id || '');
+        await loadTiktokCookieConfig();
         await loadTodayCommentStats();
       } else {
         setTiktokCommentStatus(`Lỗi: ${d.error || 'Không gửi được bình luận TikTok'}`);
@@ -1077,6 +1106,7 @@ export function MonitorPage() {
         setCurrentStaff(d.staff || null);
         setAuthStatus('');
         await loadStaffCookies();
+        await loadTiktokCookieConfig();
         await loadTodayCommentStats();
       } else {
         if (d.already_setup || d.setup_required === false) {
@@ -1096,6 +1126,8 @@ export function MonitorPage() {
     setAuthenticated(false);
     setCurrentStaff(null);
     setStaffRows([]);
+    setTiktokCookieConfig({});
+    setTiktokCookieInput('');
     setAllPosts([]);
     setHeaderSub('Đã đăng xuất');
   }
@@ -1155,6 +1187,54 @@ export function MonitorPage() {
     } catch {
       setStaffStatus('❌ Lỗi kết nối');
     }
+  }
+
+  async function saveTiktokCookie() {
+    const cookie = tiktokCookieInput.trim();
+    if (!cookie) {
+      setTiktokCookieStatus('Dán cookie TikTok trước khi lưu');
+      return;
+    }
+    setTiktokCookieBusy(true);
+    setTiktokCookieStatus('Đang lưu TikTok cookie...');
+    try {
+      const r = await api('/api/tiktok/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cookie }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setTiktokCookieConfig(d.config || {});
+        setTiktokCookieInput('');
+        setTiktokCookieStatus(`Đã lưu TikTok cookie (${d.storage === 'supabase' ? 'Supabase' : 'local'})`);
+      } else {
+        setTiktokCookieStatus('Lỗi: ' + (d.error || 'Không lưu được TikTok cookie'));
+      }
+    } catch {
+      setTiktokCookieStatus('Lỗi kết nối backend');
+    }
+    setTiktokCookieBusy(false);
+  }
+
+  async function deleteTiktokCookie() {
+    if (!confirm('Xoá TikTok cookie đang lưu?')) return;
+    setTiktokCookieBusy(true);
+    setTiktokCookieStatus('Đang xoá TikTok cookie...');
+    try {
+      const r = await api('/api/tiktok/config', { method: 'DELETE' });
+      const d = await r.json();
+      if (d.ok) {
+        setTiktokCookieConfig(d.config || {});
+        setTiktokCookieInput('');
+        setTiktokCookieStatus('Đã xoá TikTok cookie');
+      } else {
+        setTiktokCookieStatus('Lỗi: ' + (d.error || 'Không xoá được TikTok cookie'));
+      }
+    } catch {
+      setTiktokCookieStatus('Lỗi kết nối backend');
+    }
+    setTiktokCookieBusy(false);
   }
 
   const masked = (aiConfig.keys_masked || {})[aiProvider] || '';
@@ -1272,16 +1352,61 @@ export function MonitorPage() {
             />
           ) : null}
           {activeView === 'cookies' ? (
-            <StaffCookiePanel
-              staff={staffRows}
-              currentStaff={currentStaff}
-              canManage={canManageStaff}
-              status={staffStatus}
-              title="Quản lý Cooki"
-              kicker="Cookie nhân sự"
-              onSave={saveStaffCookie}
-              onDelete={deleteStaffCookie}
-            />
+            <>
+              <section className="module-panel tiktok-cookie-panel">
+                <div className="module-head">
+                  <div>
+                    <div className="module-kicker">TikTok</div>
+                    <h2>Cookie TikTok</h2>
+                  </div>
+                  <button type="button" className="btn-cancel" onClick={() => void loadTiktokCookieConfig()}>
+                    Tải lại
+                  </button>
+                </div>
+                <div className="tiktok-cookie-status-row">
+                  <span className={`status-pill ${tiktokCookieConfig.has_cookie ? 'ok' : 'fail'}`}>
+                    {tiktokCookieConfig.has_cookie ? 'Đã cấu hình' : 'Chưa có cookie'}
+                  </span>
+                  <span className="mono-cell">{tiktokCookieConfig.cookie_masked || '-'}</span>
+                  {tiktokCookieConfig.source ? <span>Nguồn: {tiktokCookieConfig.source === 'web' ? 'Web' : '.env'}</span> : null}
+                  {tiktokCookieConfig.updated_at ? <span>Cập nhật: {formatDateTime(tiktokCookieConfig.updated_at)}</span> : null}
+                </div>
+                <p className="tiktok-cookie-note">
+                  Cookie này dùng để đọc và gửi bình luận TikTok từ web. Không hiển thị cookie gốc trên giao diện.
+                </p>
+                {canManageStaff ? (
+                  <>
+                    <textarea
+                      className="tiktok-cookie-textarea"
+                      value={tiktokCookieInput}
+                      onChange={(e) => setTiktokCookieInput(e.target.value)}
+                      placeholder="Dán cookie TikTok đầy đủ từ tiktok.com, ví dụ có sessionid / sid_tt / ttwid..."
+                    />
+                    <div className="tiktok-cookie-actions">
+                      <button type="button" className="btn-submit" disabled={tiktokCookieBusy} onClick={() => void saveTiktokCookie()}>
+                        {tiktokCookieBusy ? 'Đang lưu...' : 'Lưu TikTok cookie'}
+                      </button>
+                      <button type="button" className="btn-cancel" disabled={tiktokCookieBusy || !tiktokCookieConfig.has_cookie} onClick={() => void deleteTiktokCookie()}>
+                        Xoá cookie
+                      </button>
+                      <span className="modal-result">{tiktokCookieStatus}</span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="modal-result">Chỉ admin được nhập hoặc xoá TikTok cookie.</div>
+                )}
+              </section>
+              <StaffCookiePanel
+                staff={staffRows}
+                currentStaff={currentStaff}
+                canManage={canManageStaff}
+                status={staffStatus}
+                title="Quản lý Cooki"
+                kicker="Cookie nhân sự"
+                onSave={saveStaffCookie}
+                onDelete={deleteStaffCookie}
+              />
+            </>
           ) : null}
 
       {activeView === 'manage' ? (

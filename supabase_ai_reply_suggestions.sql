@@ -56,6 +56,18 @@ end $$;
 
 create extension if not exists pgcrypto;
 
+create table if not exists public.app_kv (
+  key text primary key,
+  value jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+alter table public.app_kv
+  add column if not exists value jsonb not null default '{}'::jsonb,
+  add column if not exists updated_at timestamptz not null default now();
+
+alter table public.app_kv disable row level security;
+
 create table if not exists public.staff_users (
   id text primary key default gen_random_uuid()::text,
   name text not null,
