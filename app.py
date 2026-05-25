@@ -1044,6 +1044,15 @@ def _save_post_comment_rows_to_supabase(rows: list[dict]) -> tuple[bool, str]:
         return True, ''
     if not SUPABASE_URL or not SUPABASE_KEY:
         return False, 'Chưa cấu hình Supabase'
+    deduped_by_comment_id: dict[str, dict] = {}
+    for row in rows:
+        cid = str(row.get('comment_id') or '').strip()
+        if not cid:
+            continue
+        deduped_by_comment_id[cid] = row
+    rows = list(deduped_by_comment_id.values())
+    if not rows:
+        return True, ''
     headers = {
         'apikey': SUPABASE_KEY,
         'Authorization': f'Bearer {SUPABASE_KEY}',
