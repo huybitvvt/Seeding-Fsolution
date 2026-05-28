@@ -1,8 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
-import type { ContentPipelineArticle, ContentPipelinePost } from '@/lib/types';
+import type { ContentPipelineArticle, ContentPipelinePost, GroupRow } from '@/lib/types';
 
 type PipelineStats = {
   sources?: number;
@@ -33,7 +33,7 @@ const FORMATS = [
 ];
 
 export function MarketingPipelinePanel({ data, busy, status, onReload, onResearch }: Props) {
-  const [tab, setTab] = useState<'articles' | 'posts'>('articles');
+  const [step, setStep] = useState<1 | 2 | 3>(1);
   const [sourceFilter, setSourceFilter] = useState('all');
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [formats, setFormats] = useState<Record<string, string>>({});
@@ -42,10 +42,36 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
   const [editingPost, setEditingPost] = useState<ContentPipelinePost | null>(null);
   const [editContent, setEditContent] = useState('');
   const [editHashtags, setEditHashtags] = useState('');
+  const [groups, setGroups] = useState<GroupRow[]>([]);
+  const [publishPost, setPublishPost] = useState<ContentPipelinePost | null>(null);
+  const [selectedGroups, setSelectedGroups] = useState<Record<string, boolean>>({});
+  const [publishing, setPublishing] = useState(false);
+  const [publishStatus, setPublishStatus] = useState('');
 
   const articles = data.articles || [];
   const posts = data.posts || [];
   const selectedIds = useMemo(() => Object.entries(selected).filter(([, checked]) => checked).map(([id]) => id), [selected]);
+  const visibleArticles = articles.filter((item) => item.status !== 'written');
+
+  useEffect(() => {
+    api('/api/groups')
+      .then((res) => res.json())
+      .then((rows) => {
+        const list = Array.isArray(rows) ? rows : [];
+        setGroups(list);
+        const checked: Record<string, boolean> = {};
+        list.forEach((group: GroupRow) => {
+          if (group.id) checked[group.id] = true;
+        });
+        setSelectedGroups(checked);
+      })
+      .catch(() => setGroups([]));
+  }, []);
+
+  async function runResearch() {
+    await onResearch(sourceFilter);
+    setStep(2);
+  }
 
   async function writeSelected() {
     if (!selectedIds.length) {
@@ -66,7 +92,7 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
       setSelected({});
       setLocalStatus(`Đã tạo ${payload.count || 0} bản nháp.${payload.warning ? ` Lưu ý: ${payload.warning}` : ''}`);
       await onReload();
-      setTab('posts');
+      setStep(3);
     } catch (err: any) {
       setLocalStatus('Lỗi: ' + (err?.message || 'Không tạo được content'));
     } finally {
@@ -105,7 +131,58 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
     await onReload();
   }
 
-  const visibleArticles = articles.filter((item) => item.status !== 'written');
+  function openPublish(post: ContentPipelinePost) {
+    setPublishPost(post);
+    setPublishStatus('');
+    const checked: Record<string, boolean> = {};
+    groups.forEach((group) => {
+      if (group.id) checked[group.id] = true;
+    });
+    setSelectedGroups(checked);
+  }
+
+  async function publishToGroups() {
+    if (!publishPost) return;
+    const targetGroups = groups.filter((group) => group.id && selectedGroups[group.id]);
+    if (!targetGroups.length) {
+      setPublishStatus('Chọn ít nhất một nhóm để đăng.');
+      return;
+    }
+    const message = [publishPost.content || '', publishPost.hashtags || ''].filter(Boolean).join('\n\n').trim();
+    if (!message) {
+      setPublishStatus('Bản nháp chưa có nội dung.');
+      return;
+    }
+    setPublishing(true);
+    let ok = 0;
+    let fail = 0;
+    for (const group of targetGroups) {
+      try {
+        const res = await api('/api/post', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ group_id: group.id, message }),
+        });
+        const payload = await res.json();
+        if (payload.ok) ok++;
+        else fail++;
+      } catch {
+        fail++;
+      }
+      setPublishStatus(`Đã đăng ${ok + fail}/${targetGroups.length} nhóm: ${ok} thành công, ${fail} lỗi.`);
+    }
+    if (ok > 0) {
+      await api(`/api/content-pipeline/posts/${encodeURIComponent(publishPost.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'posted' }),
+      });
+      await onReload();
+    }
+    setPublishing(false);
+  }
+
+  const stepLabel = step === 1 ? 'Research' : step === 2 ? 'Lọc & chọn format' : 'Review & đăng bài';
 
   return (
     <section className="module-panel marketing-panel">
@@ -113,15 +190,24 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
         <div>
           <div className="module-kicker">Marketing Pipeline</div>
           <h2>AI Content Pipeline</h2>
+          <p className="module-subline">Cào tin thật từ nguồn RSS, chọn format, tạo bản nháp AI rồi đăng vào nhóm đang theo dõi.</p>
         </div>
         <div className="module-actions">
           <button type="button" className="btn-cancel" disabled={busy || writing} onClick={() => void onReload()}>
             Tải lại
           </button>
-          <button type="button" className="btn-submit" disabled={busy || writing} onClick={() => void onResearch(sourceFilter)}>
+          <button type="button" className="btn-submit" disabled={busy || writing} onClick={() => void runResearch()}>
             {busy ? 'Đang quét...' : 'Auto-scan'}
           </button>
         </div>
+      </div>
+
+      <div className="pipeline-stepper">
+        <button type="button" className={step === 1 ? 'active' : ''} onClick={() => setStep(1)}>1 Research</button>
+        <span>→</span>
+        <button type="button" className={step === 2 ? 'active' : ''} onClick={() => setStep(2)}>2 Lọc & Chọn Format</button>
+        <span>→</span>
+        <button type="button" className={step === 3 ? 'active' : ''} onClick={() => setStep(3)}>3 Review & Đăng</button>
       </div>
 
       <div className="pipeline-stats">
@@ -140,22 +226,25 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
           <option value="crunchbase">Crunchbase News</option>
           <option value="techstartups">TechStartups</option>
         </select>
-        <div className="pipeline-tabs">
-          <button type="button" className={tab === 'articles' ? 'active' : ''} onClick={() => setTab('articles')}>
-            Tin nguồn
-          </button>
-          <button type="button" className={tab === 'posts' ? 'active' : ''} onClick={() => setTab('posts')}>
-            Bản nháp content
-          </button>
-        </div>
-        {tab === 'articles' ? (
+        <div className="pipeline-current-step">{stepLabel}</div>
+        {step === 2 ? (
           <button type="button" className="btn-submit" disabled={writing || busy || !selectedIds.length} onClick={() => void writeSelected()}>
             {writing ? 'AI đang viết...' : `AI viết (${selectedIds.length})`}
           </button>
         ) : null}
       </div>
 
-      {tab === 'articles' ? (
+      {step === 1 ? (
+        <div className="pipeline-research-card">
+          <h3>Research dữ liệu thật</h3>
+          <p>
+            Bấm Auto-scan để lấy tin mới từ TechCrunch, a16z, Crunchbase News và TechStartups. Dữ liệu sau khi quét sẽ nằm ở bước 2 để chọn format.
+          </p>
+          <button type="button" className="btn-submit" disabled={busy} onClick={() => void runResearch()}>
+            {busy ? 'Đang lấy dữ liệu...' : 'Bắt đầu Auto-scan'}
+          </button>
+        </div>
+      ) : step === 2 ? (
         <div className="data-table-wrap">
           <table className="data-table pipeline-table">
             <thead>
@@ -190,7 +279,7 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
                   <td>{item.url ? <a href={item.url} target="_blank" rel="noreferrer">Mở</a> : '-'}</td>
                 </tr>
               )) : (
-                <tr><td colSpan={5} className="table-empty">Chưa có tin nguồn. Bấm Auto-scan để lấy dữ liệu thật từ RSS.</td></tr>
+                <tr><td colSpan={5} className="table-empty">Chưa có tin nguồn. Quay lại bước Research và bấm Auto-scan để lấy dữ liệu thật từ RSS.</td></tr>
               )}
             </tbody>
           </table>
@@ -207,6 +296,7 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
                 <div className="pipeline-post-actions">
                   {post.article_url ? <a href={post.article_url} target="_blank" rel="noreferrer">Nguồn</a> : null}
                   <button type="button" onClick={() => openEdit(post)}>Sửa</button>
+                  <button type="button" onClick={() => openPublish(post)}>Đăng nhóm</button>
                   <button type="button" className="danger" onClick={() => void deletePost(post.id)}>Xoá</button>
                 </div>
               </div>
@@ -238,6 +328,44 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
           <div className="modal-actions">
             <button type="button" className="btn-cancel" onClick={() => setEditingPost(null)}>Huỷ</button>
             <button type="button" className="btn-submit" onClick={() => void savePost()}>Lưu</button>
+          </div>
+        </div>
+      </div>
+
+      <div className={`modal-overlay${publishPost ? ' open' : ''}`}>
+        <div className="modal modal-wide">
+          <div className="modal-hd">
+            Đăng bản nháp vào nhóm
+            <span className="modal-close" onClick={() => setPublishPost(null)}>×</span>
+          </div>
+          <div className="pipeline-publish-preview">
+            <b>{publishPost?.article_title || 'Bản nháp content'}</b>
+            <p>{publishPost?.content || ''}</p>
+            <small>{publishPost?.hashtags || ''}</small>
+          </div>
+          <div className="field">
+            <label>Nhóm sẽ đăng</label>
+            <div className="pipeline-group-list">
+              {groups.length ? groups.map((group) => (
+                <label key={group.id}>
+                  <input
+                    type="checkbox"
+                    checked={!!selectedGroups[group.id]}
+                    onChange={(e) => setSelectedGroups((prev) => ({ ...prev, [group.id]: e.target.checked }))}
+                  />
+                  <span>{group.name || group.id}</span>
+                </label>
+              )) : <div className="table-empty">Chưa có nhóm theo dõi. Thêm nhóm ở module Quản lý nhóm trước.</div>}
+            </div>
+          </div>
+          <div className="modal-actions modal-actions-between">
+            <span className="modal-result">{publishStatus}</span>
+            <div>
+              <button type="button" className="btn-cancel" disabled={publishing} onClick={() => setPublishPost(null)}>Huỷ</button>
+              <button type="button" className="btn-submit" disabled={publishing || !groups.length} onClick={() => void publishToGroups()}>
+                {publishing ? 'Đang đăng...' : 'Đăng vào nhóm'}
+              </button>
+            </div>
           </div>
         </div>
       </div>
