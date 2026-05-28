@@ -7,6 +7,7 @@ import { ConsoleHome } from '@/components/ConsoleHome';
 import { CookieRefreshGuide } from '@/components/CookieRefreshGuide';
 import { HistoryPanel } from '@/components/HistoryPanel';
 import { LeadManagerPanel } from '@/components/LeadManagerPanel';
+import { MarketingPipelinePanel } from '@/components/MarketingPipelinePanel';
 import { PostCard } from '@/components/PostCard';
 import { SaleSetupPanel } from '@/components/SaleSetupPanel';
 import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
@@ -14,6 +15,8 @@ import { api } from '@/lib/api';
 import type {
   CommentLog,
   CommentSummary,
+  ContentPipelineArticle,
+  ContentPipelinePost,
   FbPage,
   FbPost,
   GroupRow,
@@ -35,7 +38,12 @@ type AiConfig = {
 };
 
 type JoinPrompt = { id: string; name: string };
-type ViewKey = 'home' | 'staff' | 'channels' | 'manage' | 'cookies' | 'history' | 'leads';
+type ViewKey = 'home' | 'staff' | 'channels' | 'manage' | 'cookies' | 'history' | 'leads' | 'marketing';
+type ContentPipelineData = {
+  articles?: ContentPipelineArticle[];
+  posts?: ContentPipelinePost[];
+  stats?: { sources?: number; articles?: number; new_articles?: number; draft_posts?: number };
+};
 type TikTokCookieConfig = {
   has_cookie?: boolean;
   has_login_cookie?: boolean;
@@ -97,6 +105,9 @@ export function MonitorPage() {
   const [channels, setChannels] = useState<ManagedChannel[]>([]);
   const [channelStatus, setChannelStatus] = useState('');
   const [channelBusy, setChannelBusy] = useState(false);
+  const [pipelineData, setPipelineData] = useState<ContentPipelineData>({});
+  const [pipelineStatus, setPipelineStatus] = useState('');
+  const [pipelineBusy, setPipelineBusy] = useState(false);
   const [commentLogs, setCommentLogs] = useState<CommentLog[]>([]);
   const [historyStatus, setHistoryStatus] = useState('');
   const [todayCommentCount, setTodayCommentCount] = useState<number | null>(null);
@@ -267,6 +278,44 @@ export function MonitorPage() {
       setChannelStatus('❌ Lỗi kết nối khi tải kênh');
     }
   }, []);
+
+  const loadContentPipeline = useCallback(async () => {
+    try {
+      const r = await api('/api/content-pipeline');
+      const d = await r.json();
+      if (d.ok) {
+        setPipelineData({ articles: d.articles || [], posts: d.posts || [], stats: d.stats || {} });
+        setPipelineStatus('');
+      } else {
+        setPipelineStatus('❌ ' + (d.error || 'Không tải được pipeline content'));
+      }
+    } catch {
+      setPipelineStatus('❌ Lỗi kết nối khi tải pipeline content');
+    }
+  }, []);
+
+  const runContentPipelineResearch = useCallback(async (sourceFilter: string) => {
+    setPipelineBusy(true);
+    setPipelineStatus('Đang lấy dữ liệu thật từ nguồn RSS...');
+    try {
+      const r = await api('/api/content-pipeline/research', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_filter: sourceFilter }),
+      });
+      const d = await r.json();
+      if (d.ok) {
+        setPipelineStatus(`✅ Đã thêm ${d.added || 0} tin mới.${d.warning ? ` Lưu ý: ${d.warning}` : ''}`);
+        await loadContentPipeline();
+      } else {
+        setPipelineStatus('❌ ' + (d.error || 'Không scan được dữ liệu'));
+      }
+    } catch {
+      setPipelineStatus('❌ Lỗi kết nối khi scan content');
+    } finally {
+      setPipelineBusy(false);
+    }
+  }, [loadContentPipeline]);
 
   const saveChannel = useCallback(async (payload: {
     platform: string;
@@ -539,6 +588,7 @@ export function MonitorPage() {
       await loadStaffCookies();
       await loadTiktokCookieConfig();
       await loadChannels();
+      await loadContentPipeline();
       await loadTodayCommentStats();
 
       const posts = await loadPosts();
@@ -562,7 +612,7 @@ export function MonitorPage() {
     return () => {
       cancelled = true;
     };
-  }, [authChecked, authenticated, loadChannels, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTiktokCookieConfig, loadTodayCommentStats]);
+  }, [authChecked, authenticated, loadChannels, loadContentPipeline, loadGroupName, loadPages, loadPosts, loadStaffCookies, loadTg, loadTiktokCookieConfig, loadTodayCommentStats]);
 
   useEffect(() => {
     if (autoTimerRef.current) {
@@ -1427,13 +1477,15 @@ export function MonitorPage() {
     { key: 'cookies', icon: '🍪', label: 'Cooki' },
     { key: 'history', icon: '🗓', label: 'Lịch thử thao tác' },
     { key: 'leads', icon: '◎', label: 'Lead' },
+    { key: 'marketing', icon: '✦', label: 'Marketing' },
   ];
 
   useEffect(() => {
     if (!authenticated) return;
     if (activeView === 'history') void loadCommentLogs();
     if (activeView === 'channels') void loadChannels();
-  }, [activeView, authenticated, loadChannels, loadCommentLogs]);
+    if (activeView === 'marketing') void loadContentPipeline();
+  }, [activeView, authenticated, loadChannels, loadCommentLogs, loadContentPipeline]);
 
   if (!authChecked) {
     return (
@@ -1514,6 +1566,15 @@ export function MonitorPage() {
           ) : null}
           {activeView === 'history' ? <HistoryPanel rows={commentLogs} status={historyStatus} onReload={loadCommentLogs} /> : null}
           {activeView === 'leads' ? <LeadManagerPanel leads={leads} onExtract={extractLeadsAll} onSyncPhones={syncPhoneLeadsFromComments} /> : null}
+          {activeView === 'marketing' ? (
+            <MarketingPipelinePanel
+              data={pipelineData}
+              busy={pipelineBusy}
+              status={pipelineStatus}
+              onReload={loadContentPipeline}
+              onResearch={runContentPipelineResearch}
+            />
+          ) : null}
           {activeView === 'staff' ? (
             <StaffCookiePanel
               staff={staffRows}

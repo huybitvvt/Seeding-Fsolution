@@ -91,6 +91,34 @@ export type Lead = {
   created_at?: string;
 };
 
+export type ContentPipelineArticle = {
+  id: string;
+  source_id?: string;
+  source_name?: string;
+  source_type?: string;
+  title?: string;
+  url?: string;
+  summary?: string;
+  published_at?: string;
+  status?: 'new' | 'written' | string;
+  created_at?: string;
+};
+
+export type ContentPipelinePost = {
+  id: string;
+  article_id?: string;
+  article_title?: string;
+  article_url?: string;
+  source_name?: string;
+  format?: string;
+  content?: string;
+  hashtags?: string;
+  status?: 'draft' | 'posted' | string;
+  created_by_staff_name?: string;
+  created_at?: string;
+  updated_at?: string;
+};
+
 export type ReplySuggestion = {
   post_id?: string;
   intent_label?: string;

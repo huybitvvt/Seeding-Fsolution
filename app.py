@@ -6,8 +6,11 @@ import uuid
 import hashlib
 import secrets
 import requests as _req
+from html import unescape
 from datetime import datetime, time, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import quote
+from xml.etree import ElementTree as ET
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, session
@@ -39,6 +42,7 @@ COMMENT_SUMMARIES_FILE = os.path.join(DATA_DIR, 'comment_summaries.json')
 POST_COMMENTS_FILE = os.path.join(DATA_DIR, 'post_comments.json')
 MANAGED_CHANNELS_FILE = os.path.join(DATA_DIR, 'managed_channels.json')
 TIKTOK_CONFIG_FILE = os.path.join(DATA_DIR, 'tiktok_config.json')
+CONTENT_PIPELINE_FILE = os.path.join(DATA_DIR, 'content_pipeline.json')
 
 BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '')
 DEFAULT_GROUP = os.environ.get('DEFAULT_GROUP', '3809441172650624')
@@ -103,6 +107,7 @@ _comment_summaries: dict = {}
 _post_comments: list = []
 _managed_channels: list = []
 _tiktok_config: dict = {}
+_content_pipeline: dict = {}
 
 
 def _default_business_profile() -> dict:
@@ -152,6 +157,19 @@ def _default_tiktok_config() -> dict:
     return {'cookie': '', 'updated_at': '', 'updated_by': ''}
 
 
+def _default_content_pipeline() -> dict:
+    return {
+        'sources': [
+            {'id': 'techcrunch', 'name': 'TechCrunch', 'type': 'rss', 'rss_url': 'https://techcrunch.com/feed/', 'active': True},
+            {'id': 'a16z', 'name': 'a16z', 'type': 'rss', 'rss_url': 'https://a16z.com/feed/', 'active': True},
+            {'id': 'crunchbase', 'name': 'Crunchbase News', 'type': 'rss', 'rss_url': 'https://news.crunchbase.com/feed/', 'active': True},
+            {'id': 'techstartups', 'name': 'TechStartups', 'type': 'rss', 'rss_url': 'https://techstartups.com/feed/', 'active': True},
+        ],
+        'articles': [],
+        'posts': [],
+    }
+
+
 def _hash_password(password: str, salt: str = None) -> tuple[str, str]:
     salt = salt or secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 120000)
@@ -166,7 +184,7 @@ def _verify_password(password: str, salt: str, digest: str) -> bool:
 
 
 def _load_state():
-    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config
+    global _seen_ids, _tg_chat_ids, _groups, _settings, _ai_config, _classifications, _leads, _reply_suggestions, _business_profile, _staff_cookies, _comment_logs, _comment_summaries, _post_comments, _managed_channels, _tiktok_config, _content_pipeline
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
     except OSError as e:
@@ -249,6 +267,18 @@ def _load_state():
         _managed_channels = []
     if not isinstance(_tiktok_config, dict):
         _tiktok_config = _default_tiktok_config()
+    loaded_pipeline = _read_json(CONTENT_PIPELINE_FILE, {})
+    if USE_SUPABASE:
+        try:
+            loaded_pipeline = sb.kv_get('content_pipeline', loaded_pipeline) or loaded_pipeline
+        except Exception as e:
+            print(f'[supabase] load content_pipeline failed, fallback file: {e}')
+    default_pipeline = _default_content_pipeline()
+    _content_pipeline = {
+        'sources': loaded_pipeline.get('sources') if isinstance(loaded_pipeline.get('sources'), list) else default_pipeline['sources'],
+        'articles': loaded_pipeline.get('articles') if isinstance(loaded_pipeline.get('articles'), list) else [],
+        'posts': loaded_pipeline.get('posts') if isinstance(loaded_pipeline.get('posts'), list) else [],
+    }
 
 
 def _save_seen(new_posts=None):
@@ -297,6 +327,127 @@ def _save_tiktok_config():
             sb.kv_set('tiktok_config', _tiktok_config)
         except Exception as e:
             print(f'[supabase] save_tiktok_config failed: {e}')
+
+
+def _save_content_pipeline():
+    _write_json(CONTENT_PIPELINE_FILE, _content_pipeline)
+    if USE_SUPABASE:
+        try:
+            sb.kv_set('content_pipeline', _content_pipeline)
+        except Exception as e:
+            print(f'[supabase] save content_pipeline failed: {e}')
+
+
+def _strip_html(text: str, limit: int = 600) -> str:
+    text = re.sub(r'<[^>]+>', ' ', text or '')
+    text = unescape(re.sub(r'\s+', ' ', text)).strip()
+    return text[:limit].rstrip() + ('...' if len(text) > limit else '')
+
+
+def _pipeline_article_id(url: str, title: str = '') -> str:
+    seed = (url or title or str(uuid.uuid4())).strip()
+    return hashlib.sha1(seed.encode('utf-8')).hexdigest()[:12]
+
+
+def _pipeline_post_id(article_id: str, fmt: str) -> str:
+    return hashlib.sha1(f'{article_id}|{fmt}|{datetime.utcnow().isoformat()}'.encode('utf-8')).hexdigest()[:12]
+
+
+def _rss_child_text(item, names: tuple[str, ...]) -> str:
+    for name in names:
+        node = item.find(name)
+        if node is not None and node.text:
+            return node.text.strip()
+    for child in list(item):
+        tag = child.tag.split('}', 1)[-1]
+        if tag in names and child.text:
+            return child.text.strip()
+    return ''
+
+
+def _fetch_pipeline_rss(source: dict, limit: int = 12) -> list[dict]:
+    url = source.get('rss_url') or source.get('url')
+    if not url:
+        return []
+    resp = _req.get(
+        url,
+        headers={'User-Agent': 'Mozilla/5.0 ST.Real Social Console/1.0'},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    items = root.findall('.//item') or root.findall('.//{http://www.w3.org/2005/Atom}entry')
+    rows = []
+    for item in items[:limit]:
+        title = _rss_child_text(item, ('title',))
+        link = _rss_child_text(item, ('link',))
+        if not link:
+            link_node = item.find('{http://www.w3.org/2005/Atom}link')
+            link = link_node.attrib.get('href', '') if link_node is not None else ''
+        summary = _strip_html(_rss_child_text(item, ('description', 'summary', 'content', 'encoded')), 700)
+        published = _rss_child_text(item, ('pubDate', 'published', 'updated'))
+        published_at = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+        if published:
+            try:
+                published_at = parsedate_to_datetime(published).astimezone(timezone.utc).isoformat()
+            except Exception:
+                published_at = published
+        article_id = _pipeline_article_id(link, title)
+        if title and link:
+            rows.append({
+                'id': article_id,
+                'source_id': source.get('id') or '',
+                'source_name': source.get('name') or 'RSS',
+                'source_type': source.get('type') or 'rss',
+                'title': _strip_html(title, 220),
+                'url': link,
+                'summary': summary,
+                'published_at': published_at,
+                'status': 'new',
+                'created_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+            })
+    return rows
+
+
+def _pipeline_write_article(article: dict, fmt: str) -> dict:
+    fmt_label = {
+        'pov': 'góc nhìn chuyên gia, có quan điểm rõ',
+        'info': 'bản tin ngắn, dễ hiểu',
+        'case': 'case study ứng dụng thực tế',
+        'howto': 'hướng dẫn từng bước',
+    }.get(fmt, 'bài social ngắn')
+    fallback = (
+        f"{article.get('title', 'Tin mới')}\n\n"
+        f"{article.get('summary', '')}\n\n"
+        "Góc nhìn vận hành: chọn ý chính, liên hệ tới nhu cầu khách hàng và chốt bằng một câu hỏi mở để kéo tương tác."
+    ).strip()
+    hashtags = '#STReal #Marketing #AIContent'
+    classifier = _get_classifier()
+    if classifier.api_key:
+        prompt = f"""Bạn là content marketer tiếng Việt cho ST.Real Social Console.
+
+Viết lại tin sau thành một bài đăng Facebook/LinkedIn chuyên nghiệp.
+- Format: {fmt_label}
+- Giọng văn: rõ ràng, thực tế, không phóng đại.
+- Có hook mở đầu, 3-5 ý chính, CTA nhẹ ở cuối.
+- Không bịa số liệu ngoài dữ liệu.
+
+TIÊU ĐỀ: {article.get('title', '')}
+TÓM TẮT: {article.get('summary', '')}
+LINK GỐC: {article.get('url', '')}
+
+Trả về JSON object:
+{{"content":"nội dung bài đăng", "hashtags":"3-6 hashtag liên quan"}}
+CHỈ trả về JSON."""
+        try:
+            payload = json.loads(re.sub(r'^```(?:json)?|```$', '', classifier._call_api(prompt).strip(), flags=re.I | re.M).strip())
+            content = str(payload.get('content') or '').strip()
+            ai_hashtags = str(payload.get('hashtags') or '').strip()
+            if content:
+                return {'content': content, 'hashtags': ai_hashtags or hashtags, 'ai_error': ''}
+        except Exception as e:
+            return {'content': fallback, 'hashtags': hashtags, 'ai_error': str(e)}
+    return {'content': fallback, 'hashtags': hashtags, 'ai_error': 'Chưa cấu hình API key AI'}
 
 
 def _save_classifications(new_items=None):
@@ -3533,6 +3684,129 @@ def leads_from_comments():
     if final_warning:
         payload['warning'] = final_warning
     return jsonify(payload)
+
+
+# ── Marketing Content Pipeline ─────────────────────────
+@app.route('/api/content-pipeline', methods=['GET'])
+def content_pipeline_get():
+    articles = sorted(_content_pipeline.get('articles') or [], key=lambda item: str(item.get('published_at') or item.get('created_at') or ''), reverse=True)
+    posts = sorted(_content_pipeline.get('posts') or [], key=lambda item: str(item.get('created_at') or ''), reverse=True)
+    return jsonify({
+        'ok': True,
+        'sources': _content_pipeline.get('sources') or [],
+        'articles': articles[:100],
+        'posts': posts[:100],
+        'stats': {
+            'sources': len([s for s in (_content_pipeline.get('sources') or []) if s.get('active') is not False]),
+            'articles': len(articles),
+            'new_articles': len([a for a in articles if a.get('status') == 'new']),
+            'draft_posts': len([p for p in posts if p.get('status') == 'draft']),
+        },
+    })
+
+
+@app.route('/api/content-pipeline/research', methods=['POST'])
+def content_pipeline_research():
+    global _content_pipeline
+    body = request.get_json(silent=True) or {}
+    source_filter = str(body.get('source_filter') or body.get('sourceFilter') or 'all').strip().lower()
+    sources = [s for s in (_content_pipeline.get('sources') or []) if s.get('active') is not False]
+    if source_filter not in ('', 'all'):
+        sources = [s for s in sources if str(s.get('id') or '').lower() == source_filter or str(s.get('type') or '').lower() == source_filter]
+
+    existing = {str(item.get('id')): item for item in (_content_pipeline.get('articles') or [])}
+    added = 0
+    errors = []
+    for source in sources:
+        try:
+            for article in _fetch_pipeline_rss(source, limit=12):
+                if article['id'] not in existing:
+                    existing[article['id']] = article
+                    added += 1
+        except Exception as e:
+            errors.append(f"{source.get('name') or source.get('id')}: {e}")
+
+    _content_pipeline['articles'] = sorted(existing.values(), key=lambda item: str(item.get('published_at') or item.get('created_at') or ''), reverse=True)[:250]
+    _save_content_pipeline()
+    payload = {'ok': True, 'added': added, 'article_count': len(_content_pipeline['articles'])}
+    if errors:
+        payload['warning'] = '; '.join(errors[:3])
+    return jsonify(payload)
+
+
+@app.route('/api/content-pipeline/write', methods=['POST'])
+def content_pipeline_write():
+    global _content_pipeline
+    body = request.get_json(silent=True) or {}
+    selections = body.get('selections') or []
+    if not isinstance(selections, list) or not selections:
+        return jsonify({'ok': False, 'error': 'Chọn ít nhất một tin để AI viết bài'}), 400
+
+    articles_by_id = {str(item.get('id')): item for item in (_content_pipeline.get('articles') or [])}
+    posts = list(_content_pipeline.get('posts') or [])
+    created = []
+    warnings = []
+    staff = _current_staff()
+    for item in selections[:10]:
+        article_id = str((item or {}).get('id') or '').strip()
+        fmt = str((item or {}).get('format') or 'pov').strip()
+        article = articles_by_id.get(article_id)
+        if not article:
+            continue
+        result = _pipeline_write_article(article, fmt)
+        if result.get('ai_error'):
+            warnings.append(result['ai_error'])
+        post = {
+            'id': _pipeline_post_id(article_id, fmt),
+            'article_id': article_id,
+            'article_title': article.get('title') or '',
+            'article_url': article.get('url') or '',
+            'source_name': article.get('source_name') or '',
+            'format': fmt,
+            'content': result.get('content') or '',
+            'hashtags': result.get('hashtags') or '',
+            'status': 'draft',
+            'created_by_staff_id': staff.get('id', ''),
+            'created_by_staff_name': staff.get('name', ''),
+            'created_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+        }
+        posts.append(post)
+        article['status'] = 'written'
+        created.append(post)
+
+    _content_pipeline['articles'] = list(articles_by_id.values())
+    _content_pipeline['posts'] = sorted(posts, key=lambda row: str(row.get('created_at') or ''), reverse=True)[:250]
+    _save_content_pipeline()
+    payload = {'ok': True, 'count': len(created), 'posts': created}
+    if warnings:
+        payload['warning'] = '; '.join(dict.fromkeys(warnings))[:500]
+    return jsonify(payload)
+
+
+@app.route('/api/content-pipeline/posts/<post_id>', methods=['PATCH'])
+def content_pipeline_post_update(post_id):
+    body = request.get_json(silent=True) or {}
+    changed = False
+    for post in _content_pipeline.get('posts') or []:
+        if str(post.get('id')) == str(post_id):
+            for key in ('content', 'hashtags', 'status'):
+                if key in body:
+                    post[key] = body.get(key)
+                    changed = True
+            post['updated_at'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+            break
+    if changed:
+        _save_content_pipeline()
+    return jsonify({'ok': changed})
+
+
+@app.route('/api/content-pipeline/posts/<post_id>', methods=['DELETE'])
+def content_pipeline_post_delete(post_id):
+    before = len(_content_pipeline.get('posts') or [])
+    _content_pipeline['posts'] = [post for post in (_content_pipeline.get('posts') or []) if str(post.get('id')) != str(post_id)]
+    if len(_content_pipeline['posts']) != before:
+        _save_content_pipeline()
+    return jsonify({'ok': True, 'deleted': before - len(_content_pipeline['posts'])})
 
 
 # ── Supabase ───────────────────────────────────────────

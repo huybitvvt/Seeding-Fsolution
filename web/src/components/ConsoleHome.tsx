@@ -1,6 +1,6 @@
 'use client';
 
-type ModuleKey = 'home' | 'staff' | 'channels' | 'manage' | 'cookies' | 'history' | 'leads';
+type ModuleKey = 'home' | 'staff' | 'channels' | 'manage' | 'cookies' | 'history' | 'leads' | 'marketing';
 
 type Card = {
   key: ModuleKey;
@@ -17,6 +17,7 @@ const CARDS: Card[] = [
   { key: 'cookies', icon: '🍪', title: 'Cooki', desc: 'Quản lý phiên đăng nhập và cookie nhân sự.', tone: 'purple' },
   { key: 'history', icon: '🗓', title: 'Lịch thử thao tác', desc: 'Xem lịch sử comment và trạng thái thao tác.', tone: 'red' },
   { key: 'leads', icon: '◎', title: 'Lead', desc: 'Theo dõi khách hàng tiềm năng và nhu cầu.', tone: 'yellow' },
+  { key: 'marketing', icon: '✦', title: 'Marketing', desc: 'Cào tin, chọn format và tạo bản nháp AI.', tone: 'blue' },
 ];
 
 export function ConsoleHome({ staffName, onOpen }: { staffName?: string; onOpen: (key: ModuleKey) => void }) {
