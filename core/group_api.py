@@ -120,6 +120,13 @@ class FacebookGroupAPI:
         )
         return resp.json()
 
+    def create_page_post(self, page_id: str, message: str, page_token: str) -> Optional[dict]:
+        resp = requests.post(
+            f'{GRAPH_URL}/{page_id}/feed',
+            params={'access_token': page_token, 'message': message}
+        )
+        return resp.json()
+
     def get_pages(self) -> Optional[list]:
         data = self._call('get', f'{GRAPH_URL}/me/accounts', params={'fields': 'id,name,access_token'})
         return data.get('data') if data else None

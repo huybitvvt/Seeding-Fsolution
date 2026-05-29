@@ -161,7 +161,6 @@ def _default_content_pipeline() -> dict:
     return {
         'sources': [
             {'id': 'techcrunch', 'name': 'TechCrunch', 'type': 'rss', 'rss_url': 'https://techcrunch.com/feed/', 'active': True},
-            {'id': 'a16z', 'name': 'a16z', 'type': 'rss', 'rss_url': 'https://a16z.com/feed/', 'active': True},
             {'id': 'crunchbase', 'name': 'Crunchbase News', 'type': 'rss', 'rss_url': 'https://news.crunchbase.com/feed/', 'active': True},
             {'id': 'techstartups', 'name': 'TechStartups', 'type': 'rss', 'rss_url': 'https://techstartups.com/feed/', 'active': True},
         ],
@@ -274,8 +273,18 @@ def _load_state():
         except Exception as e:
             print(f'[supabase] load content_pipeline failed, fallback file: {e}')
     default_pipeline = _default_content_pipeline()
+    loaded_sources = loaded_pipeline.get('sources') if isinstance(loaded_pipeline.get('sources'), list) else default_pipeline['sources']
+    sources = [
+        source for source in loaded_sources
+        if not (
+            str(source.get('id') or '').lower() == 'a16z'
+            and 'a16z.com/feed' in str(source.get('rss_url') or source.get('url') or '')
+        )
+    ]
+    if not sources:
+        sources = default_pipeline['sources']
     _content_pipeline = {
-        'sources': loaded_pipeline.get('sources') if isinstance(loaded_pipeline.get('sources'), list) else default_pipeline['sources'],
+        'sources': sources,
         'articles': loaded_pipeline.get('articles') if isinstance(loaded_pipeline.get('articles'), list) else [],
         'posts': loaded_pipeline.get('posts') if isinstance(loaded_pipeline.get('posts'), list) else [],
     }
@@ -351,6 +360,71 @@ def _pipeline_article_id(url: str, title: str = '') -> str:
 
 def _pipeline_post_id(article_id: str, fmt: str) -> str:
     return hashlib.sha1(f'{article_id}|{fmt}|{datetime.utcnow().isoformat()}'.encode('utf-8')).hexdigest()[:12]
+
+
+def _parse_iso_datetime(value: str):
+    value = str(value or '').strip()
+    if not value:
+        return None
+    try:
+        if value.endswith('Z'):
+            value = value[:-1] + '+00:00'
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo('Asia/Ho_Chi_Minh'))
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _pipeline_post_message(post: dict) -> str:
+    return '\n\n'.join([str(post.get('content') or '').strip(), str(post.get('hashtags') or '').strip()]).strip()
+
+
+def _page_token_from_cache(page_id: str) -> str:
+    global _pages_cache
+    page_id = str(page_id or '').strip()
+    if not page_id:
+        return ''
+    cached = (_pages_cache.get(page_id) or {}).get('access_token') or ''
+    if cached:
+        return cached
+    pages = get_api(DEFAULT_GROUP).get_pages() or []
+    _pages_cache = {p['id']: {'name': p['name'], 'access_token': p['access_token']} for p in pages if p.get('id')}
+    return (_pages_cache.get(page_id) or {}).get('access_token') or ''
+
+
+def _publish_content_pipeline_post(post: dict, targets: list[dict]) -> dict:
+    message = _pipeline_post_message(post)
+    if not message:
+        return {'ok': False, 'error': 'Bản nháp chưa có nội dung', 'results': []}
+    results = []
+    ok_count = 0
+    for target in targets:
+        target_type = str((target or {}).get('type') or '').strip().lower()
+        target_id = str((target or {}).get('id') or '').strip()
+        target_name = str((target or {}).get('name') or '').strip()
+        try:
+            if target_type == 'page':
+                page_token = _page_token_from_cache(target_id)
+                if not page_token:
+                    raise RuntimeError('Không lấy được Page token')
+                result = get_api(DEFAULT_GROUP).create_page_post(target_id, message, page_token)
+            else:
+                if not target_id:
+                    raise RuntimeError('Thiếu group_id')
+                page_id = str((target or {}).get('page_id') or '').strip()
+                page_token = _page_token_from_cache(page_id) if page_id else None
+                result = get_api(target_id).create_post(message, page_token)
+            if result and result.get('id'):
+                ok_count += 1
+                results.append({'ok': True, 'type': target_type or 'group', 'id': target_id, 'name': target_name, 'post_id': result.get('id')})
+            else:
+                err = (result or {}).get('error', {}).get('message') or 'Lỗi không xác định'
+                results.append({'ok': False, 'type': target_type or 'group', 'id': target_id, 'name': target_name, 'error': err})
+        except Exception as e:
+            results.append({'ok': False, 'type': target_type or 'group', 'id': target_id, 'name': target_name, 'error': str(e)})
+    return {'ok': ok_count > 0, 'success_count': ok_count, 'failed_count': len(results) - ok_count, 'results': results}
 
 
 def _rss_child_text(item, names: tuple[str, ...]) -> str:
@@ -2470,6 +2544,26 @@ def api_create_post():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+@app.route('/api/page-post', methods=['POST'])
+def api_create_page_post():
+    body = request.get_json() or {}
+    page_id = str(body.get('page_id') or '').strip()
+    message = str(body.get('message') or '').strip()
+    if not page_id or not message:
+        return jsonify({'ok': False, 'error': 'Thiếu page_id hoặc message'}), 400
+    try:
+        page_token = _page_token_from_cache(page_id)
+        if not page_token:
+            return jsonify({'ok': False, 'error': 'Không lấy được Page token. Kiểm tra quyền quản trị Page/cookie.'}), 400
+        result = get_api(DEFAULT_GROUP).create_page_post(page_id, message, page_token)
+        if result and result.get('id'):
+            return jsonify({'ok': True, 'post_id': result['id']})
+        err = (result or {}).get('error', {}).get('message', 'Lỗi không xác định')
+        return jsonify({'ok': False, 'error': err})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @app.route('/api/pages')
 def api_pages():
     global _pages_cache
@@ -3789,7 +3883,7 @@ def content_pipeline_post_update(post_id):
     changed = False
     for post in _content_pipeline.get('posts') or []:
         if str(post.get('id')) == str(post_id):
-            for key in ('content', 'hashtags', 'status'):
+            for key in ('content', 'hashtags', 'status', 'scheduled_at', 'scheduled_targets', 'publish_results', 'published_at'):
                 if key in body:
                     post[key] = body.get(key)
                     changed = True
@@ -3807,6 +3901,68 @@ def content_pipeline_post_delete(post_id):
     if len(_content_pipeline['posts']) != before:
         _save_content_pipeline()
     return jsonify({'ok': True, 'deleted': before - len(_content_pipeline['posts'])})
+
+
+@app.route('/api/content-pipeline/posts/<post_id>/publish', methods=['POST'])
+def content_pipeline_post_publish(post_id):
+    body = request.get_json(silent=True) or {}
+    targets = body.get('targets') or []
+    if not isinstance(targets, list) or not targets:
+        return jsonify({'ok': False, 'error': 'Chọn ít nhất một Page hoặc nhóm để đăng'}), 400
+    for post in _content_pipeline.get('posts') or []:
+        if str(post.get('id')) == str(post_id):
+            result = _publish_content_pipeline_post(post, targets)
+            post['publish_results'] = result.get('results') or []
+            post['published_at'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+            post['status'] = 'posted' if result.get('ok') else 'failed'
+            post['updated_at'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+            _save_content_pipeline()
+            return jsonify(result)
+    return jsonify({'ok': False, 'error': 'Không tìm thấy bản nháp'}), 404
+
+
+@app.route('/api/content-pipeline/posts/<post_id>/schedule', methods=['POST'])
+def content_pipeline_post_schedule(post_id):
+    body = request.get_json(silent=True) or {}
+    scheduled_at = str(body.get('scheduled_at') or '').strip()
+    targets = body.get('targets') or []
+    if not _parse_iso_datetime(scheduled_at):
+        return jsonify({'ok': False, 'error': 'Thời gian lên lịch không hợp lệ'}), 400
+    if not isinstance(targets, list) or not targets:
+        return jsonify({'ok': False, 'error': 'Chọn ít nhất một Page hoặc nhóm để lên lịch'}), 400
+    for post in _content_pipeline.get('posts') or []:
+        if str(post.get('id')) == str(post_id):
+            post['status'] = 'scheduled'
+            post['scheduled_at'] = scheduled_at
+            post['scheduled_targets'] = targets
+            post['updated_at'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+            _save_content_pipeline()
+            return jsonify({'ok': True, 'post': post})
+    return jsonify({'ok': False, 'error': 'Không tìm thấy bản nháp'}), 404
+
+
+@app.route('/api/content-pipeline/scheduled/run', methods=['GET', 'POST'])
+def content_pipeline_run_scheduled():
+    now = datetime.now(timezone.utc)
+    ran = 0
+    results = []
+    for post in _content_pipeline.get('posts') or []:
+        if str(post.get('status') or '') != 'scheduled':
+            continue
+        due_at = _parse_iso_datetime(post.get('scheduled_at'))
+        if not due_at or due_at > now:
+            continue
+        targets = post.get('scheduled_targets') or []
+        result = _publish_content_pipeline_post(post, targets if isinstance(targets, list) else [])
+        post['publish_results'] = result.get('results') or []
+        post['published_at'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+        post['status'] = 'posted' if result.get('ok') else 'failed'
+        post['updated_at'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+        results.append({'id': post.get('id'), **result})
+        ran += 1
+    if ran:
+        _save_content_pipeline()
+    return jsonify({'ok': True, 'ran': ran, 'results': results})
 
 
 # ── Supabase ───────────────────────────────────────────

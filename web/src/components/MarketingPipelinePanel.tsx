@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '@/lib/api';
-import type { ContentPipelineArticle, ContentPipelinePost, GroupRow } from '@/lib/types';
+import type { ContentPipelineArticle, ContentPipelinePost, FbPage, GroupRow } from '@/lib/types';
 
 type PipelineStats = {
   sources?: number;
@@ -43,8 +43,11 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
   const [editContent, setEditContent] = useState('');
   const [editHashtags, setEditHashtags] = useState('');
   const [groups, setGroups] = useState<GroupRow[]>([]);
+  const [pages, setPages] = useState<FbPage[]>([]);
   const [publishPost, setPublishPost] = useState<ContentPipelinePost | null>(null);
   const [selectedGroups, setSelectedGroups] = useState<Record<string, boolean>>({});
+  const [selectedPages, setSelectedPages] = useState<Record<string, boolean>>({});
+  const [scheduledAt, setScheduledAt] = useState('');
   const [publishing, setPublishing] = useState(false);
   const [publishStatus, setPublishStatus] = useState('');
 
@@ -66,6 +69,18 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
         setSelectedGroups(checked);
       })
       .catch(() => setGroups([]));
+    api('/api/pages')
+      .then((res) => res.json())
+      .then((rows) => {
+        const list = Array.isArray(rows) ? rows : [];
+        setPages(list);
+        const checked: Record<string, boolean> = {};
+        list.forEach((page: FbPage) => {
+          if (page.id) checked[page.id] = false;
+        });
+        setSelectedPages(checked);
+      })
+      .catch(() => setPages([]));
   }, []);
 
   async function runResearch() {
@@ -139,13 +154,26 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
       if (group.id) checked[group.id] = true;
     });
     setSelectedGroups(checked);
+    setSelectedPages(Object.fromEntries(pages.map((page) => [page.id, false])));
+    setScheduledAt('');
   }
 
-  async function publishToGroups() {
+  function publishTargets() {
+    return [
+      ...groups
+        .filter((group) => group.id && selectedGroups[group.id])
+        .map((group) => ({ type: 'group', id: group.id, name: group.name || group.id })),
+      ...pages
+        .filter((page) => page.id && selectedPages[page.id])
+        .map((page) => ({ type: 'page', id: page.id, name: page.name || page.id })),
+    ];
+  }
+
+  async function publishNow() {
     if (!publishPost) return;
-    const targetGroups = groups.filter((group) => group.id && selectedGroups[group.id]);
-    if (!targetGroups.length) {
-      setPublishStatus('Chọn ít nhất một nhóm để đăng.');
+    const targets = publishTargets();
+    if (!targets.length) {
+      setPublishStatus('Chọn ít nhất một Page hoặc nhóm để đăng.');
       return;
     }
     const message = [publishPost.content || '', publishPost.hashtags || ''].filter(Boolean).join('\n\n').trim();
@@ -154,32 +182,65 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
       return;
     }
     setPublishing(true);
-    let ok = 0;
-    let fail = 0;
-    for (const group of targetGroups) {
-      try {
-        const res = await api('/api/post', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ group_id: group.id, message }),
-        });
-        const payload = await res.json();
-        if (payload.ok) ok++;
-        else fail++;
-      } catch {
-        fail++;
-      }
-      setPublishStatus(`Đã đăng ${ok + fail}/${targetGroups.length} nhóm: ${ok} thành công, ${fail} lỗi.`);
-    }
-    if (ok > 0) {
-      await api(`/api/content-pipeline/posts/${encodeURIComponent(publishPost.id)}`, {
-        method: 'PATCH',
+    try {
+      const res = await api(`/api/content-pipeline/posts/${encodeURIComponent(publishPost.id)}/publish`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'posted' }),
+        body: JSON.stringify({ targets }),
       });
+      const payload = await res.json();
+      const ok = payload.success_count || 0;
+      const fail = payload.failed_count || 0;
+      setPublishStatus(`Đã đăng ${ok}/${targets.length} nơi nhận, lỗi ${fail}.`);
       await onReload();
+    } catch {
+      setPublishStatus('Lỗi kết nối khi đăng bài.');
+    } finally {
+      setPublishing(false);
     }
-    setPublishing(false);
+  }
+
+  async function schedulePost() {
+    if (!publishPost) return;
+    const targets = publishTargets();
+    if (!targets.length) {
+      setPublishStatus('Chọn ít nhất một Page hoặc nhóm để lên lịch.');
+      return;
+    }
+    if (!scheduledAt) {
+      setPublishStatus('Chọn ngày giờ lên lịch.');
+      return;
+    }
+    setPublishing(true);
+    try {
+      const res = await api(`/api/content-pipeline/posts/${encodeURIComponent(publishPost.id)}/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scheduled_at: scheduledAt, targets }),
+      });
+      const payload = await res.json();
+      if (!payload.ok) throw new Error(payload.error || 'Không lên lịch được');
+      setPublishStatus('Đã lưu lịch đăng.');
+      await onReload();
+    } catch (err: any) {
+      setPublishStatus('Lỗi: ' + (err?.message || 'Không lên lịch được'));
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  async function runScheduled() {
+    setPublishing(true);
+    try {
+      const res = await api('/api/content-pipeline/scheduled/run', { method: 'POST' });
+      const payload = await res.json();
+      setLocalStatus(`Đã kiểm tra lịch, chạy ${payload.ran || 0} bài đến hạn.`);
+      await onReload();
+    } catch {
+      setLocalStatus('Lỗi kết nối khi chạy lịch.');
+    } finally {
+      setPublishing(false);
+    }
   }
 
   const stepLabel = step === 1 ? 'Research' : step === 2 ? 'Lọc & chọn format' : 'Review & đăng bài';
@@ -195,6 +256,9 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
         <div className="module-actions">
           <button type="button" className="btn-cancel" disabled={busy || writing} onClick={() => void onReload()}>
             Tải lại
+          </button>
+          <button type="button" className="btn-cancel" disabled={publishing} onClick={() => void runScheduled()}>
+            Chạy lịch đến hạn
           </button>
           <button type="button" className="btn-submit" disabled={busy || writing} onClick={() => void runResearch()}>
             {busy ? 'Đang quét...' : 'Auto-scan'}
@@ -222,7 +286,6 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
           <option value="all">Tất cả nguồn</option>
           <option value="rss">RSS / báo</option>
           <option value="techcrunch">TechCrunch</option>
-          <option value="a16z">a16z</option>
           <option value="crunchbase">Crunchbase News</option>
           <option value="techstartups">TechStartups</option>
         </select>
@@ -238,7 +301,7 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
         <div className="pipeline-research-card">
           <h3>Research dữ liệu thật</h3>
           <p>
-            Bấm Auto-scan để lấy tin mới từ TechCrunch, a16z, Crunchbase News và TechStartups. Dữ liệu sau khi quét sẽ nằm ở bước 2 để chọn format.
+            Bấm Auto-scan để lấy tin mới từ TechCrunch, Crunchbase News và TechStartups. Dữ liệu sau khi quét sẽ nằm ở bước 2 để chọn format.
           </p>
           <button type="button" className="btn-submit" disabled={busy} onClick={() => void runResearch()}>
             {busy ? 'Đang lấy dữ liệu...' : 'Bắt đầu Auto-scan'}
@@ -291,12 +354,15 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
               <div className="pipeline-post-head">
                 <div>
                   <b>{post.article_title || 'Bản nháp content'}</b>
-                  <span>{post.source_name || 'Nguồn'} · {post.format || 'pov'} · {post.created_at ? new Date(post.created_at).toLocaleString('vi-VN') : '-'}</span>
+                  <span>
+                    {post.source_name || 'Nguồn'} · {post.format || 'pov'} · {post.status || 'draft'}
+                    {post.scheduled_at ? ` · lịch ${new Date(post.scheduled_at).toLocaleString('vi-VN')}` : ''}
+                  </span>
                 </div>
                 <div className="pipeline-post-actions">
                   {post.article_url ? <a href={post.article_url} target="_blank" rel="noreferrer">Nguồn</a> : null}
                   <button type="button" onClick={() => openEdit(post)}>Sửa</button>
-                  <button type="button" onClick={() => openPublish(post)}>Đăng nhóm</button>
+                  <button type="button" onClick={() => openPublish(post)}>Đăng / Lên lịch</button>
                   <button type="button" className="danger" onClick={() => void deletePost(post.id)}>Xoá</button>
                 </div>
               </div>
@@ -335,7 +401,7 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
       <div className={`modal-overlay${publishPost ? ' open' : ''}`}>
         <div className="modal modal-wide">
           <div className="modal-hd">
-            Đăng bản nháp vào nhóm
+            Đăng hoặc lên lịch bản nháp
             <span className="modal-close" onClick={() => setPublishPost(null)}>×</span>
           </div>
           <div className="pipeline-publish-preview">
@@ -344,7 +410,7 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
             <small>{publishPost?.hashtags || ''}</small>
           </div>
           <div className="field">
-            <label>Nhóm sẽ đăng</label>
+            <label>Nơi sẽ đăng</label>
             <div className="pipeline-group-list">
               {groups.length ? groups.map((group) => (
                 <label key={group.id}>
@@ -355,15 +421,33 @@ export function MarketingPipelinePanel({ data, busy, status, onReload, onResearc
                   />
                   <span>{group.name || group.id}</span>
                 </label>
-              )) : <div className="table-empty">Chưa có nhóm theo dõi. Thêm nhóm ở module Quản lý nhóm trước.</div>}
+              )) : null}
+              {pages.length ? pages.map((page) => (
+                <label key={page.id}>
+                  <input
+                    type="checkbox"
+                    checked={!!selectedPages[page.id]}
+                    onChange={(e) => setSelectedPages((prev) => ({ ...prev, [page.id]: e.target.checked }))}
+                  />
+                  <span>Page: {page.name || page.id}</span>
+                </label>
+              )) : null}
+              {!groups.length && !pages.length ? <div className="table-empty">Chưa có nhóm hoặc Page. Thêm nhóm hoặc kiểm tra quyền quản trị Page trước.</div> : null}
             </div>
+          </div>
+          <div className="field">
+            <label>Lên lịch đăng nếu cần</label>
+            <input className="modal-input" type="datetime-local" value={scheduledAt} onChange={(e) => setScheduledAt(e.target.value)} />
           </div>
           <div className="modal-actions modal-actions-between">
             <span className="modal-result">{publishStatus}</span>
             <div>
               <button type="button" className="btn-cancel" disabled={publishing} onClick={() => setPublishPost(null)}>Huỷ</button>
-              <button type="button" className="btn-submit" disabled={publishing || !groups.length} onClick={() => void publishToGroups()}>
-                {publishing ? 'Đang đăng...' : 'Đăng vào nhóm'}
+              <button type="button" className="btn-cancel" disabled={publishing || (!groups.length && !pages.length)} onClick={() => void schedulePost()}>
+                Lưu lịch
+              </button>
+              <button type="button" className="btn-submit" disabled={publishing || (!groups.length && !pages.length)} onClick={() => void publishNow()}>
+                {publishing ? 'Đang xử lý...' : 'Đăng ngay'}
               </button>
             </div>
           </div>

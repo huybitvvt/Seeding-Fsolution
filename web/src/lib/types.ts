@@ -113,7 +113,11 @@ export type ContentPipelinePost = {
   format?: string;
   content?: string;
   hashtags?: string;
-  status?: 'draft' | 'posted' | string;
+  status?: 'draft' | 'scheduled' | 'posted' | 'failed' | string;
+  scheduled_at?: string;
+  scheduled_targets?: { type?: 'group' | 'page' | string; id?: string; name?: string }[];
+  publish_results?: { ok?: boolean; type?: string; id?: string; name?: string; post_id?: string; error?: string }[];
+  published_at?: string;
   created_by_staff_name?: string;
   created_at?: string;
   updated_at?: string;
