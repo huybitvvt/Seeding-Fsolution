@@ -125,7 +125,7 @@ export function StaffCookiePanel({
     const requestId = `fb_cookie_${Date.now()}`;
     const timer = window.setTimeout(() => {
       window.removeEventListener('message', onMessage);
-      setCookieBridgeStatus('Không thấy extension phản hồi. Hãy cài/cập nhật Seeding Fsolution Bridge rồi thử lại.');
+      setCookieBridgeStatus('Không thấy extension phản hồi. Hãy cài/cập nhật Lead Hunter_F.Solution Bridge rồi thử lại.');
     }, 12000);
 
     function onMessage(event: MessageEvent) {

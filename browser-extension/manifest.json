@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Seeding Fsolution Bridge",
-  "version": "0.1.3",
-  "description": "Ket noi Seeding Fsolution voi phien dang nhap Chrome that cho Facebook/TikTok.",
+  "name": "Lead Hunter_F.Solution Bridge",
+  "version": "0.1.4",
+  "description": "Ket noi Phan mem Lead Hunter_F.Solution voi phien dang nhap Chrome that cho Facebook/TikTok.",
   "permissions": ["tabs", "scripting", "cookies"],
   "host_permissions": [
     "https://www.tiktok.com/*",
@@ -28,7 +28,7 @@
     }
   ],
   "action": {
-    "default_title": "Seeding Fsolution Bridge",
+    "default_title": "Lead Hunter_F.Solution Bridge",
     "default_popup": "popup.html"
   }
 }

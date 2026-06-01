@@ -1,4 +1,4 @@
-# Huong dan chay Seeding Fsolution cho khach clone
+# Huong dan chay Phan mem Lead Hunter_F.Solution cho khach clone
 
 ## 1. Cai dat
 
@@ -98,7 +98,7 @@ Lam theo thu tu:
 2. Bam `Load unpacked`.
 3. Chon thu muc `browser-extension`.
 4. Dang nhap TikTok tren Chrome.
-5. Mo web Seeding Fsolution va bam `Gui CMT TikTok`.
+5. Mo web Phan mem Lead Hunter_F.Solution va bam `Gui CMT TikTok`.
 
 Khong can dan cookie TikTok vao web de gui comment. Neu TikTok bat dang nhap lai, dang nhap truc tiep tren tab TikTok roi bam gui lai.
 

@@ -41,13 +41,13 @@ export function AuthPanel({ mode, status, onLogin, onSetup }: Props) {
       <section className="auth-shell">
         <div className="auth-brand">
           <div className="auth-logo-card">
-            <img src="/st-real-logo.jpg" alt="Seeding Fsolution" />
+            <img src="/F-Solution-logo.png" alt="F-Solution" />
           </div>
           <div className="auth-brand-copy">
-            <div className="auth-kicker">Seeding Fsolution</div>
-            <h1>Quản lý bình luận và chăm sóc khách hàng đa kênh</h1>
+            <div className="auth-kicker">F-Solution Lead Hunter</div>
+            <h1>Phần mềm Lead Hunter_F.Solution</h1>
             <p>
-              Theo dõi bài viết, lọc comment Facebook/TikTok, lưu lịch sử sale và hỗ trợ AI tóm tắt trong một màn hình vận hành.
+              Quét bài viết Facebook/TikTok, phát hiện nhu cầu, chấm điểm lead nóng và hỗ trợ sale chăm sóc khách hàng trong một màn hình vận hành.
             </p>
           </div>
           <div className="auth-feature-grid" aria-hidden="true">
@@ -68,7 +68,7 @@ export function AuthPanel({ mode, status, onLogin, onSetup }: Props) {
 
         <form className="auth-card" onSubmit={onSubmit}>
           <div className="auth-form-logo">
-            <img src="/st-real-logo.jpg" alt="Seeding Fsolution" />
+            <img src="/F-Solution-logo.png" alt="F-Solution" />
           </div>
           <div className="auth-title">{isSetup ? 'Setup tài khoản đầu tiên' : 'Đăng nhập'}</div>
           <div className="auth-sub">

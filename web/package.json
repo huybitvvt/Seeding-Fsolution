@@ -1,5 +1,5 @@
 {
-  "name": "fb-moni-web",
+  "name": "lead-hunter-fsolution-web",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,7 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "next": "^15.5.7",
+    "next": "^16.2.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -18,7 +18,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "eslint": "^9",
-    "eslint-config-next": "^15.5.7",
+    "eslint-config-next": "^16.2.6",
     "typescript": "^5.7.0"
   }
 }

@@ -3,8 +3,8 @@ import { Roboto } from 'next/font/google';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Seeding Fsolution',
-  description: 'Theo dõi bài viết, lọc bình luận và quản lý sale đa kênh',
+  title: 'Phần mềm Lead Hunter_F.Solution',
+  description: 'Lead Hunter nội bộ công ty F-Solution',
 };
 
 const roboto = Roboto({

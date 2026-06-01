@@ -1,4 +1,4 @@
-# Seeding Fsolution Bridge
+# Lead Hunter_F.Solution Bridge
 
 Extension này dùng để gửi bình luận TikTok và lấy cookie Facebook khi admin bấm nút trên web bằng chính phiên đăng nhập Chrome của khách. Web không tự đọc cookie nền; extension chỉ trả cookie khi người dùng chủ động bấm.
 
@@ -9,7 +9,7 @@ Extension này dùng để gửi bình luận TikTok và lấy cookie Facebook k
 3. Chọn `Load unpacked`.
 4. Chọn thư mục `browser-extension` trong source dự án.
 5. Đăng nhập TikTok/Facebook trên Chrome.
-6. Mở web Seeding Fsolution:
+6. Mở web Phần mềm Lead Hunter_F.Solution:
    - Vào `Lead` hoặc `TikTok CMT`, chọn video và bấm `Gửi CMT TikTok`.
    - Vào `Quản lý Cooki` -> thêm/sửa nhân sự -> bấm `Lấy từ Chrome` để lấy cookie Facebook.
 

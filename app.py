@@ -445,7 +445,7 @@ def _fetch_pipeline_rss(source: dict, limit: int = 12) -> list[dict]:
         return []
     resp = _req.get(
         url,
-        headers={'User-Agent': 'Mozilla/5.0 Seeding Fsolution/1.0'},
+        headers={'User-Agent': 'Mozilla/5.0 Lead Hunter F.Solution/1.0'},
         timeout=15,
     )
     resp.raise_for_status()
@@ -498,7 +498,7 @@ def _pipeline_write_article(article: dict, fmt: str) -> dict:
     hashtags = '#STReal #Marketing #AIContent'
     classifier = _get_classifier()
     if classifier.api_key:
-        prompt = f"""Bạn là content marketer tiếng Việt cho Seeding Fsolution.
+        prompt = f"""Bạn là content marketer tiếng Việt cho Phần mềm Lead Hunter_F.Solution của F-Solution.
 
 Viết lại tin sau thành một bài đăng Facebook/LinkedIn chuyên nghiệp.
 - Format: {fmt_label}
