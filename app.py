@@ -24,7 +24,7 @@ from core import supabase_store as sb
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
 load_dotenv(os.path.join(BASE_DIR, '.env'), override=True)
-RUNTIME_DATA_DIR = os.environ.get('RUNTIME_DATA_DIR') or ('/tmp/fb-moni' if os.environ.get('VERCEL') else DATA_DIR)
+RUNTIME_DATA_DIR = os.environ.get('RUNTIME_DATA_DIR') or ('/tmp/seeding-fsolution' if os.environ.get('VERCEL') else DATA_DIR)
 
 SEEN_FILE = os.path.join(DATA_DIR, 'seen_posts.json')
 TG_CONFIG_FILE = os.path.join(DATA_DIR, 'telegram_config.json')
@@ -45,7 +45,7 @@ TIKTOK_CONFIG_FILE = os.path.join(DATA_DIR, 'tiktok_config.json')
 CONTENT_PIPELINE_FILE = os.path.join(DATA_DIR, 'content_pipeline.json')
 
 BOT_TOKEN = os.environ.get('TG_BOT_TOKEN', '')
-DEFAULT_GROUP = os.environ.get('DEFAULT_GROUP', '3809441172650624')
+DEFAULT_GROUP = os.environ.get('DEFAULT_GROUP', '')
 PORT = int(os.environ.get('PORT', 5000))
 WEB_UI_URL = (os.environ.get('WEB_UI_URL') or 'http://localhost:3000').rstrip('/')
 USE_LEGACY_UI = os.environ.get('USE_LEGACY_UI', '').lower() in ('1', 'true', 'yes')
@@ -76,7 +76,7 @@ ALLOWED_COMMENT_IMAGE_TYPES = {
 }
 
 app = Flask(__name__, template_folder='views')
-app.secret_key = os.environ.get('APP_SECRET_KEY', 'fb-moni-local-dev-secret-change-me')
+app.secret_key = os.environ.get('APP_SECRET_KEY', 'seeding-fsolution-local-dev-secret-change-me')
 
 _cors_origins = [
     o.strip()
