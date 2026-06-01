@@ -29,6 +29,16 @@ create table if not exists public.leads (
   contact_status text,
   confidence numeric,
   evidence text,
+  lead_score integer not null default 0,
+  score_reasons jsonb not null default '[]'::jsonb,
+  lead_level text not null default 'cold',
+  lead_status text not null default 'new',
+  assigned_sale_id text,
+  assigned_sale_name text,
+  sla_minutes integer not null default 0,
+  sla_due_at timestamptz,
+  alert_level text,
+  next_action text,
   raw_lead jsonb not null default '{}'::jsonb,
   created_by_staff_id text,
   created_by_staff_name text,
@@ -36,6 +46,18 @@ create table if not exists public.leads (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.leads
+  add column if not exists lead_score integer not null default 0,
+  add column if not exists score_reasons jsonb not null default '[]'::jsonb,
+  add column if not exists lead_level text not null default 'cold',
+  add column if not exists lead_status text not null default 'new',
+  add column if not exists assigned_sale_id text,
+  add column if not exists assigned_sale_name text,
+  add column if not exists sla_minutes integer not null default 0,
+  add column if not exists sla_due_at timestamptz,
+  add column if not exists alert_level text,
+  add column if not exists next_action text;
 
 create index if not exists leads_post_id_idx
   on public.leads (post_id);
@@ -45,6 +67,15 @@ create index if not exists leads_customer_phone_idx
 
 create index if not exists leads_platform_idx
   on public.leads (platform);
+
+create index if not exists leads_lead_score_idx
+  on public.leads (lead_score desc);
+
+create index if not exists leads_lead_level_idx
+  on public.leads (lead_level);
+
+create index if not exists leads_lead_status_idx
+  on public.leads (lead_status);
 
 create index if not exists leads_created_at_idx
   on public.leads (created_at desc);

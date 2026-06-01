@@ -21,6 +21,7 @@ import type {
   FbPost,
   GroupRow,
   Lead,
+  LeadDashboard,
   ManagedChannel,
   ReplySuggestion,
   StaffAccount,
@@ -85,6 +86,7 @@ export function MonitorPage() {
   const [allPosts, setAllPosts] = useState<FbPost[]>([]);
   const [classifications, setClassifications] = useState<Record<string, string>>({});
   const [leads, setLeads] = useState<Record<string, Lead[]>>({});
+  const [leadDashboard, setLeadDashboard] = useState<LeadDashboard>({});
   const [replySuggestions, setReplySuggestions] = useState<Record<string, ReplySuggestion>>({});
   const [commentSummaries, setCommentSummaries] = useState<Record<string, CommentSummary>>({});
   const [leadsBusy, setLeadsBusy] = useState(false);
@@ -563,11 +565,12 @@ export function MonitorPage() {
 
       let autoClassify = false;
       try {
-        const [pRes, cRes, clRes, lRes, rsRes, csRes] = await Promise.all([
+        const [pRes, cRes, clRes, lRes, ldRes, rsRes, csRes] = await Promise.all([
           api('/api/ai/providers'),
           api('/api/ai/config'),
           api('/api/ai/classifications'),
           api('/api/ai/leads'),
+          api('/api/leads/dashboard'),
           api('/api/ai/reply-suggestions'),
           api('/api/ai/comment-summaries'),
         ]);
@@ -580,6 +583,8 @@ export function MonitorPage() {
         setAiAutoClassify(autoClassify);
         setClassifications(await clRes.json());
         setLeads(await lRes.json());
+        const leadDashPayload = await ldRes.json();
+        setLeadDashboard(leadDashPayload.dashboard || {});
         setReplySuggestions(await rsRes.json());
         setCommentSummaries(await csRes.json());
       } catch {
@@ -1245,6 +1250,8 @@ export function MonitorPage() {
       const d = await r.json();
       if (d.ok) {
         setLeads((prev) => ({ ...prev, ...d.leads }));
+        const dash = await api('/api/leads/dashboard');
+        if (dash.ok) setLeadDashboard(((await dash.json()).dashboard || {}) as LeadDashboard);
         const count = Object.values(d.leads || {}).reduce(
           (sum: number, items) => sum + (items as Lead[]).length,
           0,
@@ -1269,6 +1276,8 @@ export function MonitorPage() {
       const d = await r.json();
       if (d.ok) {
         setLeads((prev) => ({ ...prev, ...(d.leads || {}) }));
+        const dash = await api('/api/leads/dashboard');
+        if (dash.ok) setLeadDashboard(((await dash.json()).dashboard || {}) as LeadDashboard);
         setAiStatus(`✅ Đã đưa ${d.count || 0} lead có SĐT vào bảng Lead${d.storage ? ` · ${d.storage}` : ''}`);
         if (d.warning) setTimeout(() => setAiStatus(`⚠️ ${d.warning}`), 1200);
       } else {
@@ -1279,6 +1288,32 @@ export function MonitorPage() {
     }
     setLeadsBusy(false);
     setTimeout(() => setAiStatus(''), 7000);
+  }
+
+  async function updateLead(leadKey: string, patch: Partial<Lead>) {
+    const r = await api(`/api/leads/${encodeURIComponent(leadKey)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) {
+      throw new Error(d.error || d.warning || 'Không cập nhật được lead');
+    }
+    const updated = d.lead as Lead;
+    setLeads((prev) => {
+      const next: Record<string, Lead[]> = {};
+      Object.entries(prev).forEach(([postId, items]) => {
+        next[postId] = (items || []).map((item) => (item.lead_key === leadKey ? { ...item, ...updated } : item));
+      });
+      const pid = updated.post_id || '';
+      if (pid && !Object.values(next).some((items) => items.some((item) => item.lead_key === leadKey))) {
+        next[pid] = [...(next[pid] || []), updated];
+      }
+      return next;
+    });
+    const dash = await api('/api/leads/dashboard');
+    if (dash.ok) setLeadDashboard(((await dash.json()).dashboard || {}) as LeadDashboard);
   }
 
   async function classifyAll() {
@@ -1595,7 +1630,15 @@ export function MonitorPage() {
             />
           ) : null}
           {activeView === 'history' ? <HistoryPanel rows={commentLogs} status={historyStatus} onReload={loadCommentLogs} /> : null}
-          {activeView === 'leads' ? <LeadManagerPanel leads={leads} onExtract={extractLeadsAll} onSyncPhones={syncPhoneLeadsFromComments} /> : null}
+          {activeView === 'leads' ? (
+            <LeadManagerPanel
+              leads={leads}
+              dashboard={leadDashboard}
+              onExtract={extractLeadsAll}
+              onSyncPhones={syncPhoneLeadsFromComments}
+              onUpdate={updateLead}
+            />
+          ) : null}
           {activeView === 'marketing' ? (
             <MarketingPipelinePanel
               data={pipelineData}

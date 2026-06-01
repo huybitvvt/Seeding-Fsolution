@@ -7,7 +7,7 @@ import hashlib
 import secrets
 import requests as _req
 from html import unescape
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timezone, timedelta
 from email.utils import parsedate_to_datetime
 from urllib.parse import quote
 from xml.etree import ElementTree as ET
@@ -549,6 +549,163 @@ def _lead_key(lead: dict) -> str:
     return hashlib.sha1(base.encode('utf-8')).hexdigest()
 
 
+LEAD_NEED_KEYWORDS = [
+    'tôi cần', 'mình cần', 'cần hỗ trợ', 'cần xây dựng', 'cần tool', 'cần phần mềm',
+    'tìm đơn vị', 'tìm người làm', 'báo giá', 'ib', 'inbox', 'quan tâm', 'đặt hàng',
+]
+LEAD_SOLUTION_KEYWORDS = [
+    'appsheet', 'app sheet', 'google sheet', 'webapp', 'web app', 'web', 'phần mềm', 'excel',
+    'bán hàng', 'khách hàng', 'crm', 'sale', 'vận đơn', 'quản lý đơn', 'hàng hóa', 'marketing',
+    'kế toán', 'thuế', 'nhân sự', 'chấm công', 'kho', 'thiết bị', 'logistics', 'vận tải',
+    'kho bến', 'mỹ phẩm', 'xây dựng', 'thời trang', 'nhà hàng', 'xuất nhập khẩu', 'nông sản',
+]
+LEAD_DEADLINE_KEYWORDS = ['deadline', 'gấp', 'ngay', 'hôm nay', 'tuần này', 'tháng này', 'trước ngày', 'triển khai trong']
+LEAD_BUDGET_KEYWORDS = ['ngân sách', 'budget', 'chi phí', 'bao nhiêu', 'báo giá', 'giá']
+LEAD_POSITIVE_REPLY_KEYWORDS = ['đúng rồi', 'ok', 'quan tâm', 'ib', 'inbox', 'nhắn mình', 'gửi mình', 'cho mình']
+
+
+def _lead_text_blob(lead: dict) -> str:
+    parts = [
+        lead.get('need'), lead.get('customer_need'), lead.get('evidence'), lead.get('intent'),
+        lead.get('product_or_service'), lead.get('budget'), lead.get('urgency'),
+    ]
+    phones = lead.get('phones') if isinstance(lead.get('phones'), list) else []
+    parts.extend(phones)
+    return ' '.join(str(item or '') for item in parts).lower()
+
+
+def _contains_any(text: str, keywords: list[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _score_lead(lead: dict, phone: str = '') -> tuple[int, list[str]]:
+    explicit = lead.get('lead_score') or lead.get('score')
+    if explicit not in (None, ''):
+        try:
+            score = max(-100, min(150, int(float(explicit))))
+            reasons = lead.get('score_reasons') if isinstance(lead.get('score_reasons'), list) else []
+            return score, [str(item) for item in reasons if str(item or '').strip()]
+        except Exception:
+            pass
+
+    text = _lead_text_blob(lead)
+    score = 0
+    reasons: list[str] = []
+
+    if _contains_any(text, LEAD_NEED_KEYWORDS):
+        score += 10
+        reasons.append('Có từ khóa nhu cầu')
+    if 'báo giá' in text or 'bao nhiêu' in text or 'giá' in text:
+        score += 20
+        reasons.append('Có yêu cầu báo giá/giá')
+    if phone or extract_phones(text):
+        score += 30
+        reasons.append('Có số điện thoại')
+    if _contains_any(text, LEAD_DEADLINE_KEYWORDS):
+        score += 20
+        reasons.append('Có deadline/thời điểm triển khai')
+    if 'gấp' in text or 'ngay' in text:
+        score += 25
+        reasons.append('Có tín hiệu cần gấp')
+    if _contains_any(text, LEAD_BUDGET_KEYWORDS):
+        score += 25
+        reasons.append('Có ngân sách/chi phí')
+    if _contains_any(text, LEAD_SOLUTION_KEYWORDS):
+        score += 30
+        reasons.append('Khớp giải pháp F-Solution')
+    if _contains_any(text, LEAD_POSITIVE_REPLY_KEYWORDS) and str(lead.get('source') or lead.get('lead_source') or '').lower() == 'comment':
+        score += 40
+        reasons.append('Khách phản hồi/comment xác nhận')
+
+    confidence = lead.get('confidence')
+    try:
+        if float(confidence or 0) >= 0.9 and score > 0:
+            score += 5
+            reasons.append('AI/luật nhận diện độ chắc cao')
+    except Exception:
+        pass
+
+    return max(0, min(150, score)), reasons
+
+
+def _lead_level(score: int) -> tuple[str, str]:
+    if score > 90:
+        return 'very_hot', 'Lead rất nóng'
+    if score >= 61:
+        return 'hot', 'Lead nóng'
+    if score >= 31:
+        return 'warm', 'Lead ấm'
+    if score >= 11:
+        return 'interested', 'Lead quan tâm'
+    return 'cold', 'Lead lạnh'
+
+
+def _lead_sla_minutes(level: str) -> int:
+    return {
+        'interested': 24 * 60,
+        'warm': 2 * 60,
+        'hot': 30,
+        'very_hot': 15,
+    }.get(level, 0)
+
+
+def _parse_dt(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except Exception:
+        try:
+            return parsedate_to_datetime(str(value))
+        except Exception:
+            return None
+
+
+def _iso_utc(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+
+
+def _lead_due_at(created_at: str, level: str) -> str:
+    minutes = _lead_sla_minutes(level)
+    if not minutes:
+        return ''
+    base = _parse_dt(created_at) or datetime.now(timezone.utc)
+    return _iso_utc(base.astimezone(timezone.utc) + timedelta(minutes=minutes))
+
+
+def _lead_alert(level: str, status: str, due_at: str) -> tuple[str, str]:
+    if status not in ('new', 'assigned', 'not_contacted', ''):
+        return 'ok', 'Đã xử lý'
+    if not due_at:
+        return 'none', ''
+    due = _parse_dt(due_at)
+    if not due:
+        return 'none', ''
+    now = datetime.now(timezone.utc)
+    remaining = (due.astimezone(timezone.utc) - now).total_seconds() / 60
+    if remaining < 0:
+        return 'red', 'Quá SLA'
+    if level in ('hot', 'very_hot') and remaining <= 10:
+        return 'red', 'Sắp quá SLA'
+    if level == 'warm' and remaining <= 30:
+        return 'orange', 'Sắp đến hạn'
+    return 'ok', ''
+
+
+def _lead_next_action(level: str, phone: str = '') -> str:
+    if level == 'very_hot':
+        return 'Gọi ngay, inbox, đặt lịch demo, gửi hồ sơ/case study và báo giá nhanh.'
+    if level == 'hot':
+        return 'Trong 30 phút: gọi điện/inbox, comment bài viết, đặt lịch demo và cập nhật CRM.'
+    if level == 'warm':
+        return 'Trong 2 giờ: inbox khách, comment bài viết, gọi nếu có SĐT, mục tiêu chuyển demo.'
+    if level == 'interested':
+        return 'Theo dõi, comment mềm, inbox nhẹ, gửi tài liệu hoặc demo mẫu.'
+    return 'Chỉ lưu dữ liệu và theo dõi, chưa auto comment để tránh spam.'
+
+
 def _normalise_lead(lead: dict, post_id: str = '') -> dict:
     if not isinstance(lead, dict):
         lead = {}
@@ -562,6 +719,13 @@ def _normalise_lead(lead: dict, post_id: str = '') -> dict:
     platform = str(lead.get('platform') or lead.get('source_platform') or '').strip().lower()
     if not platform:
         platform = 'tiktok' if str(pid).startswith('tiktok_') else 'facebook'
+    created_at = str(lead.get('created_at') or datetime.utcnow().isoformat(timespec='seconds') + 'Z')
+    score, reasons = _score_lead(lead, phone)
+    level, level_label = _lead_level(score)
+    lead_status = str(lead.get('lead_status') or lead.get('crm_status') or 'new').strip() or 'new'
+    sla_due_at = str(lead.get('sla_due_at') or _lead_due_at(created_at, level))
+    alert_level, alert_label = _lead_alert(level, lead_status, sla_due_at)
+    next_action = str(lead.get('next_action') or _lead_next_action(level, phone)).strip()
     return {
         **lead,
         'lead_key': str(lead.get('lead_key') or _lead_key({**lead, 'post_id': pid, 'phone': phone})),
@@ -585,6 +749,19 @@ def _normalise_lead(lead: dict, post_id: str = '') -> dict:
         'contact_status': 'has_phone' if phone else str(lead.get('contact_status') or 'no_phone'),
         'confidence': float(lead.get('confidence') or (0.95 if phone else 0.6)),
         'evidence': str(lead.get('evidence') or '').strip(),
+        'lead_score': score,
+        'score_reasons': reasons,
+        'lead_level': level,
+        'lead_level_label': level_label,
+        'lead_status': lead_status,
+        'assigned_sale_id': str(lead.get('assigned_sale_id') or '').strip(),
+        'assigned_sale_name': str(lead.get('assigned_sale_name') or lead.get('assigned_sale') or '').strip(),
+        'sla_minutes': _lead_sla_minutes(level),
+        'sla_due_at': sla_due_at,
+        'alert_level': alert_level,
+        'alert_label': alert_label,
+        'next_action': next_action,
+        'created_at': created_at,
     }
 
 
@@ -636,6 +813,16 @@ def _lead_to_supabase_row(lead: dict) -> dict:
         'contact_status': row.get('contact_status'),
         'confidence': row.get('confidence'),
         'evidence': row.get('evidence'),
+        'lead_score': row.get('lead_score') or 0,
+        'score_reasons': row.get('score_reasons') or [],
+        'lead_level': row.get('lead_level') or 'cold',
+        'lead_status': row.get('lead_status') or 'new',
+        'assigned_sale_id': row.get('assigned_sale_id') or '',
+        'assigned_sale_name': row.get('assigned_sale_name') or '',
+        'sla_minutes': row.get('sla_minutes') or 0,
+        'sla_due_at': row.get('sla_due_at') or None,
+        'alert_level': row.get('alert_level') or '',
+        'next_action': row.get('next_action') or '',
         'raw_lead': row,
         'created_by_staff_id': staff.get('id', ''),
         'created_by_staff_name': staff.get('name', ''),
@@ -664,14 +851,31 @@ def _save_leads_to_supabase(leads: list[dict]) -> tuple[bool, str]:
         'Content-Type': 'application/json',
         'Prefer': 'resolution=merge-duplicates,return=minimal',
     }
+    crm_columns = {
+        'lead_score', 'score_reasons', 'lead_level', 'lead_status',
+        'assigned_sale_id', 'assigned_sale_name', 'sla_minutes', 'sla_due_at',
+        'alert_level', 'next_action',
+    }
+
+    def post_chunk(chunk: list[dict]):
+        return _req.post(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_LEAD_TABLE}?on_conflict=lead_key",
+            headers=headers,
+            json=chunk,
+            timeout=30,
+        )
+
+    def schema_column_error(resp) -> bool:
+        text = (resp.text or '').lower()
+        return 'schema cache' in text and 'column' in text
+
     try:
         for i in range(0, len(rows), 200):
-            resp = _req.post(
-                f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_LEAD_TABLE}?on_conflict=lead_key",
-                headers=headers,
-                json=rows[i:i + 200],
-                timeout=30,
-            )
+            chunk = rows[i:i + 200]
+            resp = post_chunk(chunk)
+            if resp.status_code not in (200, 201, 204) and schema_column_error(resp):
+                fallback = [{k: v for k, v in row.items() if k not in crm_columns} for row in chunk]
+                resp = post_chunk(fallback)
             if resp.status_code not in (200, 201, 204):
                 if resp.headers.get('content-type', '').startswith('application/json'):
                     try:
@@ -710,7 +914,20 @@ def _supabase_lead_row_to_public(row: dict) -> dict:
         'contact_status': row.get('contact_status') or raw.get('contact_status') or '',
         'confidence': row.get('confidence') or raw.get('confidence') or 0,
         'evidence': row.get('evidence') or raw.get('evidence') or '',
+        'lead_score': row.get('lead_score') or raw.get('lead_score') or raw.get('score') or 0,
+        'score_reasons': row.get('score_reasons') or raw.get('score_reasons') or [],
+        'lead_level': row.get('lead_level') or raw.get('lead_level') or '',
+        'lead_level_label': raw.get('lead_level_label') or '',
+        'lead_status': row.get('lead_status') or raw.get('lead_status') or raw.get('crm_status') or 'new',
+        'assigned_sale_id': row.get('assigned_sale_id') or raw.get('assigned_sale_id') or '',
+        'assigned_sale_name': row.get('assigned_sale_name') or raw.get('assigned_sale_name') or raw.get('assigned_sale') or '',
+        'sla_minutes': row.get('sla_minutes') or raw.get('sla_minutes') or 0,
+        'sla_due_at': row.get('sla_due_at') or raw.get('sla_due_at') or '',
+        'alert_level': row.get('alert_level') or raw.get('alert_level') or '',
+        'alert_label': raw.get('alert_label') or '',
+        'next_action': row.get('next_action') or raw.get('next_action') or '',
         'created_at': row.get('created_at') or raw.get('created_at') or '',
+        'updated_at': row.get('updated_at') or raw.get('updated_at') or '',
     }
 
 
@@ -732,13 +949,167 @@ def _load_leads_from_supabase(limit: int = 3000) -> tuple[dict, str]:
             return {}, resp.text[:300]
         grouped: dict[str, list] = {}
         for row in resp.json() or []:
-            lead = _supabase_lead_row_to_public(row)
+            lead = _normalise_lead(_supabase_lead_row_to_public(row))
             pid = str(lead.get('post_id') or '')
             if pid:
                 grouped.setdefault(pid, []).append(lead)
         return grouped, ''
     except Exception as e:
         return {}, str(e)[:300]
+
+
+def _flatten_lead_groups(grouped: dict) -> list[dict]:
+    rows: list[dict] = []
+    for post_id, items in (grouped or {}).items():
+        for item in items or []:
+            rows.append(_normalise_lead({**item, 'post_id': item.get('post_id') or post_id}, str(post_id)))
+    return rows
+
+
+def _lead_dashboard_payload(grouped: dict) -> dict:
+    rows = _flatten_lead_groups(grouped)
+    total = len(rows)
+    by_level = {key: 0 for key in ['cold', 'interested', 'warm', 'hot', 'very_hot']}
+    by_status: dict[str, int] = {}
+    by_group: dict[str, int] = {}
+    by_platform: dict[str, int] = {}
+    overdue = 0
+    hot = 0
+    very_hot = 0
+    contacted = 0
+    demo = 0
+    quoted = 0
+    won = 0
+    auto_comment_candidates = 0
+    scores: list[int] = []
+
+    for lead in rows:
+        level = str(lead.get('lead_level') or 'cold')
+        status = str(lead.get('lead_status') or 'new')
+        platform = str(lead.get('platform') or 'unknown')
+        group_id = str(lead.get('group_id') or 'unknown')
+        score = int(lead.get('lead_score') or 0)
+        scores.append(score)
+        by_level[level] = by_level.get(level, 0) + 1
+        by_status[status] = by_status.get(status, 0) + 1
+        by_group[group_id] = by_group.get(group_id, 0) + 1
+        by_platform[platform] = by_platform.get(platform, 0) + 1
+        if level in ('hot', 'very_hot'):
+            hot += 1
+        if level == 'very_hot':
+            very_hot += 1
+        if str(lead.get('alert_level') or '') in ('red', 'orange'):
+            overdue += 1
+        if status in ('contacted', 'consulting', 'demo', 'quoted', 'won', 'lost'):
+            contacted += 1
+        if status == 'demo':
+            demo += 1
+        if status == 'quoted':
+            quoted += 1
+        if status == 'won':
+            won += 1
+        if level in ('hot', 'very_hot'):
+            auto_comment_candidates += 1
+
+    def pct_value(num: int, denom: int = total) -> float:
+        return round((num / denom) * 100, 1) if denom else 0
+
+    return {
+        'total': total,
+        'hot_count': hot,
+        'very_hot_count': very_hot,
+        'overdue_count': overdue,
+        'avg_score': round(sum(scores) / len(scores), 1) if scores else 0,
+        'by_level': by_level,
+        'by_status': by_status,
+        'by_platform': by_platform,
+        'top_groups': sorted(
+            [{'group_id': key, 'count': value} for key, value in by_group.items()],
+            key=lambda item: item['count'],
+            reverse=True,
+        )[:8],
+        'rates': {
+            'hot_rate': pct_value(hot),
+            'contacted_rate': pct_value(contacted),
+            'demo_rate': pct_value(demo),
+            'quoted_rate': pct_value(quoted),
+            'won_rate': pct_value(won),
+            'auto_comment_candidate_rate': pct_value(auto_comment_candidates),
+        },
+    }
+
+
+def _update_lead_in_memory(lead_key: str, patch: dict) -> tuple[bool, dict]:
+    global _leads
+    for post_id, items in (_leads or {}).items():
+        for idx, item in enumerate(items or []):
+            key = str(item.get('lead_key') or _lead_key(item))
+            if key == lead_key:
+                next_row = _normalise_lead({**item, **patch, 'lead_key': lead_key, 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}, str(post_id))
+                _leads[post_id][idx] = next_row
+                _save_leads()
+                return True, next_row
+    return False, {}
+
+
+def _patch_lead_in_supabase(lead_key: str, row: dict) -> tuple[bool, str]:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        return False, 'Chưa cấu hình Supabase'
+    payload = {
+        'contact_status': row.get('contact_status'),
+        'confidence': row.get('confidence'),
+        'lead_score': row.get('lead_score') or 0,
+        'score_reasons': row.get('score_reasons') or [],
+        'lead_level': row.get('lead_level') or 'cold',
+        'lead_status': row.get('lead_status') or 'new',
+        'assigned_sale_id': row.get('assigned_sale_id') or '',
+        'assigned_sale_name': row.get('assigned_sale_name') or '',
+        'sla_minutes': row.get('sla_minutes') or 0,
+        'sla_due_at': row.get('sla_due_at') or None,
+        'alert_level': row.get('alert_level') or '',
+        'next_action': row.get('next_action') or '',
+        'raw_lead': row,
+        'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+    }
+    try:
+        resp = _req.patch(
+            f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_LEAD_TABLE}",
+            headers={
+                'apikey': SUPABASE_KEY,
+                'Authorization': f'Bearer {SUPABASE_KEY}',
+                'Content-Type': 'application/json',
+                'Prefer': 'return=minimal',
+            },
+            params={'lead_key': f'eq.{lead_key}'},
+            json=payload,
+            timeout=30,
+        )
+        if resp.status_code not in (200, 204):
+            if 'schema cache' in (resp.text or '').lower() and 'column' in (resp.text or '').lower():
+                minimal_payload = {
+                    'contact_status': row.get('contact_status'),
+                    'confidence': row.get('confidence'),
+                    'raw_lead': row,
+                    'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+                }
+                resp = _req.patch(
+                    f"{SUPABASE_URL.rstrip('/')}/rest/v1/{SUPABASE_LEAD_TABLE}",
+                    headers={
+                        'apikey': SUPABASE_KEY,
+                        'Authorization': f'Bearer {SUPABASE_KEY}',
+                        'Content-Type': 'application/json',
+                        'Prefer': 'return=minimal',
+                    },
+                    params={'lead_key': f'eq.{lead_key}'},
+                    json=minimal_payload,
+                    timeout=30,
+                )
+                if resp.status_code in (200, 204):
+                    return True, ''
+            return False, resp.text[:300]
+        return True, ''
+    except Exception as e:
+        return False, str(e)[:300]
 
 
 def _comment_rows_to_phone_leads(rows: list[dict]) -> list[dict]:
@@ -3674,6 +4045,49 @@ def ai_leads_get():
     return jsonify(_leads)
 
 
+@app.route('/api/leads/dashboard', methods=['GET'])
+def leads_dashboard_get():
+    remote, warning = _load_leads_from_supabase()
+    grouped = remote or _leads
+    payload = {'ok': True, 'dashboard': _lead_dashboard_payload(grouped)}
+    if warning and not remote:
+        payload['warning'] = warning
+    return jsonify(payload)
+
+
+@app.route('/api/leads/<lead_key>', methods=['PATCH'])
+def lead_update(lead_key):
+    body = request.get_json() or {}
+    allowed = {
+        'lead_status', 'assigned_sale_id', 'assigned_sale_name', 'next_action',
+        'contact_status', 'urgency', 'budget', 'location', 'product_or_service',
+    }
+    patch = {key: body.get(key) for key in allowed if key in body}
+    if not patch:
+        return jsonify({'ok': False, 'error': 'Không có dữ liệu cập nhật'}), 400
+
+    remote, _warning = _load_leads_from_supabase()
+    found = False
+    updated = {}
+    for item in _flatten_lead_groups(remote or _leads):
+        if str(item.get('lead_key') or '') == str(lead_key):
+            updated = _normalise_lead({**item, **patch, 'lead_key': lead_key, 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}, item.get('post_id') or '')
+            found = True
+            break
+    if not found:
+        found, updated = _update_lead_in_memory(str(lead_key), patch)
+    else:
+        _update_lead_in_memory(str(lead_key), patch)
+    if not found:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy lead'}), 404
+
+    supabase_ok, supabase_error = _patch_lead_in_supabase(str(lead_key), updated)
+    payload = {'ok': True, 'lead': updated, 'storage': 'supabase' if supabase_ok else 'local'}
+    if supabase_error:
+        payload['warning'] = supabase_error
+    return jsonify(payload)
+
+
 @app.route('/api/ai/reply-suggestions', methods=['GET'])
 def ai_reply_suggestions_get():
     return jsonify(_reply_suggestions)
@@ -3789,9 +4203,9 @@ def ai_extract_leads():
         for post in to_extract:
             pid = post.get('id')
             if pid:
-                _leads[pid] = results.get(pid, [])
+                _leads[pid] = [_normalise_lead(item, pid) for item in results.get(pid, [])]
         _save_leads()
-        flat_leads = [lead for items in results.values() for lead in (items or [])]
+        flat_leads = [lead for items in _leads.values() for lead in (items or []) if str(lead.get('post_id') or '') in {str(p.get('id') or '') for p in to_extract}]
         supabase_ok, supabase_error = _save_leads_to_supabase(flat_leads)
     else:
         supabase_ok, supabase_error = True, ''

@@ -91,7 +91,33 @@ export type Lead = {
   contact_status?: string;
   confidence?: number;
   evidence?: string;
+  lead_score?: number;
+  score_reasons?: string[];
+  lead_level?: 'cold' | 'interested' | 'warm' | 'hot' | 'very_hot' | string;
+  lead_level_label?: string;
+  lead_status?: 'new' | 'contacted' | 'consulting' | 'demo' | 'quoted' | 'won' | 'lost' | string;
+  assigned_sale_id?: string;
+  assigned_sale_name?: string;
+  sla_minutes?: number;
+  sla_due_at?: string;
+  alert_level?: 'none' | 'ok' | 'orange' | 'red' | string;
+  alert_label?: string;
+  next_action?: string;
   created_at?: string;
+  updated_at?: string;
+};
+
+export type LeadDashboard = {
+  total?: number;
+  hot_count?: number;
+  very_hot_count?: number;
+  overdue_count?: number;
+  avg_score?: number;
+  by_level?: Record<string, number>;
+  by_status?: Record<string, number>;
+  by_platform?: Record<string, number>;
+  top_groups?: { group_id?: string; count?: number }[];
+  rates?: Record<string, number>;
 };
 
 export type ContentPipelineArticle = {
