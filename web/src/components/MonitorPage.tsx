@@ -8,6 +8,7 @@ import { CookieRefreshGuide } from '@/components/CookieRefreshGuide';
 import { HistoryPanel } from '@/components/HistoryPanel';
 import { LeadManagerPanel } from '@/components/LeadManagerPanel';
 import { MarketingPipelinePanel } from '@/components/MarketingPipelinePanel';
+import { AutomationPanel } from '@/components/AutomationPanel';
 import { PostCard } from '@/components/PostCard';
 import { SaleSetupPanel } from '@/components/SaleSetupPanel';
 import { StaffCookiePanel, type StaffPayload } from '@/components/StaffCookiePanel';
@@ -30,6 +31,19 @@ import type {
 } from '@/lib/types';
 import { extractSlug } from '@/lib/utils';
 
+/** Đảm bảo giá trị nhận từ API là object map hợp lệ ({} nếu không phải). */
+function asObjectMap<T>(value: unknown): Record<string, T> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, T>;
+  }
+  return {};
+}
+
+/** Đảm bảo giá trị nhận từ API là mảng ([] nếu không phải). */
+function asArray<T>(value: unknown): T[] {
+  return Array.isArray(value) ? (value as T[]) : [];
+}
+
 type AiProviders = Record<string, { default_model?: string }>;
 type AiConfig = {
   provider?: string;
@@ -39,7 +53,7 @@ type AiConfig = {
 };
 
 type JoinPrompt = { id: string; name: string };
-type ViewKey = 'home' | 'staff' | 'channels' | 'manage' | 'cookies' | 'history' | 'leads' | 'marketing';
+type ViewKey = 'home' | 'staff' | 'channels' | 'manage' | 'cookies' | 'history' | 'leads' | 'marketing' | 'automation';
 type ContentPipelineData = {
   articles?: ContentPipelineArticle[];
   posts?: ContentPipelinePost[];
@@ -234,6 +248,7 @@ export function MonitorPage() {
       setSetupRequired(!!d.setup_required && !d.simple_login);
       setAuthenticated(!!d.authenticated);
       setCurrentStaff(d.staff || null);
+      setCanManageStaff(!!d.can_manage || d.staff?.role === 'admin');
       setAuthStatus('');
     } catch {
       setSetupRequired(false);
@@ -245,17 +260,28 @@ export function MonitorPage() {
     }
   }, []);
 
+  function handleAuthRequired() {
+    setAuthenticated(false);
+    setCurrentStaff(null);
+    setCanManageStaff(false);
+    setAuthStatus('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.');
+  }
+
+  function isAuthRequired(res: Response, payload: any) {
+    return res.status === 401 && (payload?.auth_required || /đăng nhập/i.test(String(payload?.error || '')));
+  }
+
   const loadStaffCookies = useCallback(async () => {
     try {
       const r = await api('/api/staff-cookies');
       const d = await r.json();
-      setStaffRows(d.staff || []);
-      setCanManageStaff(!!d.can_manage);
+      setStaffRows(Array.isArray(d.staff) ? d.staff : []);
+      setCanManageStaff(!!d.can_manage || currentStaff?.role === 'admin');
       if (d.warning) setStaffStatus(`⚠️ ${d.warning}`);
     } catch {
       setStaffStatus('Không tải được cookie nhân sự');
     }
-  }, []);
+  }, [currentStaff?.role]);
 
   const loadTiktokCookieConfig = useCallback(async () => {
     try {
@@ -276,6 +302,10 @@ export function MonitorPage() {
     try {
       const r = await api('/api/channels');
       const d = await r.json();
+      if (isAuthRequired(r, d)) {
+        handleAuthRequired();
+        return [] as ManagedChannel[];
+      }
       if (d.ok) {
         const rows = d.channels || [];
         channelsRef.current = rows;
@@ -295,6 +325,10 @@ export function MonitorPage() {
     try {
       const r = await api('/api/content-pipeline');
       const d = await r.json();
+      if (isAuthRequired(r, d)) {
+        handleAuthRequired();
+        return;
+      }
       if (d.ok) {
         setPipelineData({ articles: d.articles || [], posts: d.posts || [], stats: d.stats || {} });
         setPipelineStatus('');
@@ -316,6 +350,10 @@ export function MonitorPage() {
         body: JSON.stringify({ source_filter: sourceFilter }),
       });
       const d = await r.json();
+      if (isAuthRequired(r, d)) {
+        handleAuthRequired();
+        return;
+      }
       if (d.ok) {
         setPipelineStatus(`✅ Đã thêm ${d.added || 0} tin mới.${d.warning ? ` Lưu ý: ${d.warning}` : ''}`);
         await loadContentPipeline();
@@ -442,7 +480,7 @@ export function MonitorPage() {
   const loadTg = useCallback(async () => {
     try {
       const r = await api('/api/telegram/chatids');
-      setTgIds(await r.json());
+      setTgIds(asArray<string>(await r.json()));
     } catch {
       /* ignore */
     }
@@ -581,12 +619,12 @@ export function MonitorPage() {
         setAiProvider(cfg.provider || 'gemini');
         autoClassify = !!cfg.auto_classify;
         setAiAutoClassify(autoClassify);
-        setClassifications(await clRes.json());
-        setLeads(await lRes.json());
+        setClassifications(asObjectMap(await clRes.json()));
+        setLeads(asObjectMap(await lRes.json()));
         const leadDashPayload = await ldRes.json();
-        setLeadDashboard(leadDashPayload.dashboard || {});
-        setReplySuggestions(await rsRes.json());
-        setCommentSummaries(await csRes.json());
+        setLeadDashboard(leadDashPayload?.dashboard || {});
+        setReplySuggestions(asObjectMap(await rsRes.json()));
+        setCommentSummaries(asObjectMap(await csRes.json()));
       } catch {
         /* ignore */
       }
@@ -594,7 +632,8 @@ export function MonitorPage() {
       let rows: GroupRow[] = [];
       try {
         const r = await api('/api/groups');
-        rows = await r.json();
+        const data = await r.json();
+        if (Array.isArray(data)) rows = data;
       } catch {
         /* ignore */
       }
@@ -718,11 +757,17 @@ export function MonitorPage() {
           setToolStatus(prev);
           setJoinPrompt({ id: d.id, name: d.name || d.id });
         } else {
-          await api('/api/groups', {
+          const saveRes = await api('/api/groups', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: d.id, name: d.name || '' }),
           });
+          const saveData = await saveRes.json().catch(() => ({ ok: false, error: `Server lỗi ${saveRes.status}` }));
+          if (!saveData.ok) {
+            setToolStatus(`❌ ${saveData.error || 'Không lưu được nhóm'}`);
+            setTimeout(() => setToolStatus(prev), 5000);
+            return;
+          }
           setGroups((g) => (g.includes(d.id) ? g : [...g, d.id]));
           setToolStatus(`✅ Đã thêm: ${d.name || d.id}`);
           setTimeout(() => setToolStatus(prev), 5000);
@@ -744,11 +789,16 @@ export function MonitorPage() {
   }
 
   async function forceAddGroup(gid: string, gname: string) {
-    await api('/api/groups', {
+    const r = await api('/api/groups', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ id: gid, name: gname }),
     });
+    const d = await r.json().catch(() => ({ ok: false, error: `Server lỗi ${r.status}` }));
+    if (!d.ok) {
+      setJoinMsg('❌ ' + (d.error || 'Không lưu được nhóm'));
+      return;
+    }
     setGroups((g) => (g.includes(gid) ? g : [...g, gid]));
     setGroupNames((prev) => ({ ...prev, [gid]: gname }));
     setJoinPrompt(null);
@@ -763,11 +813,16 @@ export function MonitorPage() {
       const d = await r.json();
       if (d.ok) {
         if (d.already_member) {
-          await api('/api/groups', {
+          const saveRes = await api('/api/groups', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id: gid, name: gname }),
           });
+          const saveData = await saveRes.json().catch(() => ({ ok: false, error: `Server lỗi ${saveRes.status}` }));
+          if (!saveData.ok) {
+            setJoinMsg('❌ ' + (saveData.error || 'Không lưu được nhóm'));
+            return;
+          }
           setGroups((g) => (g.includes(gid) ? g : [...g, gid]));
           setJoinPrompt(null);
         } else {
@@ -816,13 +871,13 @@ export function MonitorPage() {
       body: JSON.stringify({ chat_id: cid }),
     });
     const d = await r.json();
-    if (d.ok) setTgIds(d.chat_ids);
+    if (d.ok) setTgIds(asArray<string>(d.chat_ids));
   }
 
   async function removeTg(cid: string) {
     const r = await api(`/api/telegram/chatids/${cid}`, { method: 'DELETE' });
     const d = await r.json();
-    setTgIds(d.chat_ids);
+    setTgIds(asArray<string>(d.chat_ids));
   }
 
   async function testTg(cid: string) {
@@ -1237,6 +1292,19 @@ export function MonitorPage() {
     setTimeout(() => setAiStatus(''), 9000);
   }, []);
 
+  async function reloadLeads() {
+    try {
+      const [lr, dr] = await Promise.all([
+        api('/api/ai/leads'),
+        api('/api/leads/dashboard'),
+      ]);
+      if (lr.ok) setLeads(asObjectMap(await lr.json()));
+      if (dr.ok) setLeadDashboard(((await dr.json())?.dashboard || {}) as LeadDashboard);
+    } catch {
+      /* ignore */
+    }
+  }
+
   async function extractLeadsAll() {
     if (!allPosts.length) return;
     setLeadsBusy(true);
@@ -1316,6 +1384,63 @@ export function MonitorPage() {
     if (dash.ok) setLeadDashboard(((await dash.json()).dashboard || {}) as LeadDashboard);
   }
 
+  function applyLeadUpdate(leadKey: string, updated: Lead) {
+    setLeads((prev) => {
+      const next: Record<string, Lead[]> = {};
+      Object.entries(prev).forEach(([postId, items]) => {
+        next[postId] = (items || []).map((item) => (item.lead_key === leadKey ? { ...item, ...updated } : item));
+      });
+      const pid = updated.post_id || '';
+      if (pid && !Object.values(next).some((items) => items.some((item) => item.lead_key === leadKey))) {
+        next[pid] = [...(next[pid] || []), updated];
+      }
+      return next;
+    });
+  }
+
+  async function addLeadEvent(leadKey: string, event: string, note?: string) {
+    const r = await api(`/api/leads/${encodeURIComponent(leadKey)}/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event, note: note || '' }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) {
+      throw new Error(d.error || d.warning || 'Không ghi nhận được sự kiện');
+    }
+    applyLeadUpdate(leadKey, d.lead as Lead);
+    const dash = await api('/api/leads/dashboard');
+    if (dash.ok) setLeadDashboard(((await dash.json()).dashboard || {}) as LeadDashboard);
+  }
+
+  async function assignLead(leadKey: string, saleId: string) {
+    const r = await api(`/api/leads/${encodeURIComponent(leadKey)}/assign`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sale_id: saleId }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) {
+      throw new Error(d.error || d.warning || 'Không chia được lead');
+    }
+    applyLeadUpdate(leadKey, d.lead as Lead);
+    const dash = await api('/api/leads/dashboard');
+    if (dash.ok) setLeadDashboard(((await dash.json()).dashboard || {}) as LeadDashboard);
+  }
+
+  async function autoCommentLead(leadKey: string) {
+    const r = await api(`/api/leads/${encodeURIComponent(leadKey)}/auto-comment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.ok) {
+      throw new Error(d.error || d.warning || 'Không gửi được comment');
+    }
+    if (d.lead) applyLeadUpdate(leadKey, d.lead as Lead);
+  }
+
   async function classifyAll() {
     if (!allPosts.length) return;
     setClassifyBusy(true);
@@ -1348,6 +1473,7 @@ export function MonitorPage() {
         setAuthenticated(true);
         setSetupRequired(false);
         setCurrentStaff(d.staff || null);
+        setCanManageStaff(!!d.can_manage || d.staff?.role === 'admin');
         setAuthStatus('');
         await loadStaffCookies();
         await loadTodayCommentStats();
@@ -1372,6 +1498,7 @@ export function MonitorPage() {
         setAuthenticated(true);
         setSetupRequired(false);
         setCurrentStaff(d.staff || null);
+        setCanManageStaff(!!d.can_manage || d.staff?.role === 'admin');
         setAuthStatus('');
         await loadStaffCookies();
         await loadTiktokCookieConfig();
@@ -1421,8 +1548,8 @@ export function MonitorPage() {
         error: r.ok ? 'Phản hồi server không hợp lệ' : `Server lỗi ${r.status}`,
       }));
       if (d.ok) {
-        setStaffRows(d.staff || []);
-        setCanManageStaff(!!d.can_manage);
+        setStaffRows(Array.isArray(d.staff) ? d.staff : []);
+        setCanManageStaff(!!d.can_manage || currentStaff?.role === 'admin');
         const storageText = d.storage === 'supabase' ? 'Supabase' : 'local';
         setStaffStatus(`${staffId ? '✅ Đã cập nhật nhân sự' : '✅ Đã thêm nhân sự'} (${storageText})${d.warning ? ` · ${d.warning}` : ''}`);
         return true;
@@ -1446,8 +1573,8 @@ export function MonitorPage() {
         error: r.ok ? 'Phản hồi server không hợp lệ' : `Server lỗi ${r.status}`,
       }));
       if (d.ok) {
-        setStaffRows(d.staff || []);
-        setCanManageStaff(!!d.can_manage);
+        setStaffRows(Array.isArray(d.staff) ? d.staff : []);
+        setCanManageStaff(!!d.can_manage || currentStaff?.role === 'admin');
         setStaffStatus('✅ Đã xoá cookie');
       } else {
         setStaffStatus('❌ ' + (d.error || 'Lỗi xoá cookie'));
@@ -1543,6 +1670,7 @@ export function MonitorPage() {
     { key: 'history', icon: '🗓', label: 'Lịch thử thao tác' },
     { key: 'leads', icon: '◎', label: 'Lead' },
     { key: 'marketing', icon: '✦', label: 'Marketing' },
+    { key: 'automation', icon: '⚙', label: 'Tự động hoá' },
   ];
 
   useEffect(() => {
@@ -1634,9 +1762,14 @@ export function MonitorPage() {
             <LeadManagerPanel
               leads={leads}
               dashboard={leadDashboard}
+              sales={staffRows.filter((s) => s.enabled !== false).map((s) => ({ id: s.id || '', name: s.name || s.username || 'Sale', role: s.role }))}
               onExtract={extractLeadsAll}
               onSyncPhones={syncPhoneLeadsFromComments}
               onUpdate={updateLead}
+              onAddEvent={addLeadEvent}
+              onAssign={assignLead}
+              onAutoComment={autoCommentLead}
+              onReload={reloadLeads}
             />
           ) : null}
           {activeView === 'marketing' ? (
@@ -1648,11 +1781,12 @@ export function MonitorPage() {
               onResearch={runContentPipelineResearch}
             />
           ) : null}
+          {activeView === 'automation' ? <AutomationPanel /> : null}
           {activeView === 'staff' ? (
             <StaffCookiePanel
               staff={staffRows}
               currentStaff={currentStaff}
-              canManage={canManageStaff}
+              canManage={canManageStaff || currentStaff?.role === 'admin'}
               status={staffStatus}
               title="Nhân sự"
               kicker="Quản lý tài khoản"
@@ -1683,7 +1817,7 @@ export function MonitorPage() {
                 <p className="tiktok-cookie-note">
                   Cookie này chỉ hỗ trợ đọc bình luận khi TikTok chặn API. Gửi bình luận TikTok dùng Chrome extension, không dùng cookie lưu trên server.
                 </p>
-                {canManageStaff ? (
+                {canManageStaff || currentStaff?.role === 'admin' ? (
                   <>
                     <textarea
                       className="tiktok-cookie-textarea"
@@ -1711,7 +1845,7 @@ export function MonitorPage() {
               <StaffCookiePanel
                 staff={staffRows}
                 currentStaff={currentStaff}
-                canManage={canManageStaff}
+                canManage={canManageStaff || currentStaff?.role === 'admin'}
                 status={staffStatus}
                 title="Quản lý Cooki"
                 kicker="Cookie nhân sự"
@@ -1861,7 +1995,7 @@ export function MonitorPage() {
           onDeleteKey={deleteAiKey}
           staff={staffRows}
           currentStaff={currentStaff}
-          canManageStaff={canManageStaff}
+          canManageStaff={canManageStaff || currentStaff?.role === 'admin'}
           staffStatus={staffStatus}
           showStaffManager={false}
           onSaveStaff={saveStaffCookie}

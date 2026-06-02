@@ -1,6 +1,7 @@
 import os
 import json
 import threading
+import time as _time
 import re
 import uuid
 import hashlib
@@ -108,6 +109,7 @@ _post_comments: list = []
 _managed_channels: list = []
 _tiktok_config: dict = {}
 _content_pipeline: dict = {}
+_scan_counter: dict = {}  # {YYYY-MM-DD: số bài quét được trong ngày}
 
 
 def _default_business_profile() -> dict:
@@ -563,6 +565,67 @@ LEAD_DEADLINE_KEYWORDS = ['deadline', 'gấp', 'ngay', 'hôm nay', 'tuần này'
 LEAD_BUDGET_KEYWORDS = ['ngân sách', 'budget', 'chi phí', 'bao nhiêu', 'báo giá', 'giá']
 LEAD_POSITIVE_REPLY_KEYWORDS = ['đúng rồi', 'ok', 'quan tâm', 'ib', 'inbox', 'nhắn mình', 'gửi mình', 'cho mình']
 
+# ── Phân loại theo đặc tả: Nền tảng / Module nghiệp vụ / Module ngành ──
+# Mỗi nhóm là {nhãn hiển thị: [từ khóa nhận diện]}
+LEAD_PLATFORM_TAXONOMY = {
+    'AppSheet': ['appsheet', 'app sheet'],
+    'Google Sheet': ['google sheet', 'gsheet', 'google trang tính'],
+    'WebApp': ['webapp', 'web app', 'ứng dụng web'],
+    'Web': ['website', 'web'],
+    'Phần mềm': ['phần mềm', 'software', 'app', 'ứng dụng'],
+    'Excel': ['excel', 'bảng tính'],
+}
+LEAD_BUSINESS_MODULE_TAXONOMY = {
+    'Bán hàng': ['bán hàng', 'sale', 'sales', 'pos'],
+    'Khách hàng/CRM': ['crm', 'khách hàng', 'chăm sóc khách'],
+    'Vận đơn/Quản lý đơn': ['vận đơn', 'quản lý đơn', 'đơn hàng'],
+    'Hàng hóa/Kho': ['hàng hóa', 'kho', 'tồn kho', 'kho bến'],
+    'Marketing': ['marketing', 'quảng cáo', 'truyền thông'],
+    'Kế toán/Thuế': ['kế toán', 'thuế', 'hóa đơn', 'công nợ'],
+    'Nhân sự/Chấm công': ['nhân sự', 'chấm công', 'hr', 'lương'],
+    'Thiết bị': ['thiết bị', 'tài sản'],
+}
+LEAD_INDUSTRY_TAXONOMY = {
+    'Nông sản': ['nông sản', 'nông nghiệp'],
+    'Xuất nhập khẩu': ['xuất nhập khẩu', 'xnk', 'import', 'export'],
+    'Logistics/Vận tải': ['logistics', 'vận tải', 'vận chuyển', 'kho bến'],
+    'Mỹ phẩm': ['mỹ phẩm', 'cosmetic'],
+    'Xây dựng': ['xây dựng', 'công trình', 'thi công'],
+    'Thời trang': ['thời trang', 'quần áo', 'fashion'],
+    'Nhà hàng/F&B': ['nhà hàng', 'quán ăn', 'f&b', 'cafe', 'cà phê'],
+}
+
+
+def _match_taxonomy(text: str, taxonomy: dict) -> list[str]:
+    """Trả về danh sách nhãn khớp với text (ưu tiên nhãn xuất hiện trước)."""
+    matched: list[str] = []
+    for label, keywords in taxonomy.items():
+        if any(keyword in text for keyword in keywords):
+            matched.append(label)
+    return matched
+
+
+def _classify_lead_modules(lead: dict) -> dict:
+    """Phân loại lead theo Nền tảng / Module nghiệp vụ / Module ngành (đặc tả Bước 2)."""
+    text = _lead_text_blob(lead)
+    platforms = _match_taxonomy(text, LEAD_PLATFORM_TAXONOMY)
+    business = _match_taxonomy(text, LEAD_BUSINESS_MODULE_TAXONOMY)
+    industry = _match_taxonomy(text, LEAD_INDUSTRY_TAXONOMY)
+    matched_keywords = sorted({
+        kw
+        for group in (LEAD_NEED_KEYWORDS, LEAD_SOLUTION_KEYWORDS, LEAD_DEADLINE_KEYWORDS, LEAD_BUDGET_KEYWORDS)
+        for kw in group
+        if kw in text
+    })
+    return {
+        'platform_tags': platforms,
+        'business_module': business[0] if business else '',
+        'business_modules': business,
+        'industry_module': industry[0] if industry else '',
+        'industry_modules': industry,
+        'matched_keywords': matched_keywords,
+    }
+
 
 def _lead_text_blob(lead: dict) -> str:
     parts = [
@@ -706,6 +769,40 @@ def _lead_next_action(level: str, phone: str = '') -> str:
     return 'Chỉ lưu dữ liệu và theo dõi, chưa auto comment để tránh spam.'
 
 
+# ── Điểm động theo hành vi khách (đặc tả Mục III) ──
+BEHAVIOR_SCORE_RULES = {
+    'comment_reply': (40, 'Khách comment phản hồi'),
+    'inbox_reply': (50, 'Khách inbox phản hồi'),
+    'agree_demo': (50, 'Khách đồng ý demo'),
+    'detail_request': (30, 'Khách gửi yêu cầu chi tiết'),
+    'provided_phone': (30, 'Khách cung cấp SĐT'),
+    'no_reply_7d': (-20, 'Không phản hồi 7 ngày'),
+    'rejected': (-50, 'Khách từ chối tư vấn'),
+    'spam_fake': (-100, 'Spam/fake'),
+}
+
+
+def _behavior_score(lead: dict) -> tuple[int, list[str]]:
+    """Tính tổng điểm cộng/trừ động dựa trên danh sách sự kiện hành vi đã ghi nhận."""
+    events = lead.get('behavior_events')
+    if not isinstance(events, list):
+        return 0, []
+    delta = 0
+    reasons: list[str] = []
+    seen: set[str] = set()
+    for ev in events:
+        ev_type = str((ev or {}).get('type') if isinstance(ev, dict) else ev or '').strip()
+        if ev_type not in BEHAVIOR_SCORE_RULES:
+            continue
+        points, label = BEHAVIOR_SCORE_RULES[ev_type]
+        delta += points
+        if ev_type not in seen:
+            sign = '+' if points >= 0 else ''
+            reasons.append(f'{label} ({sign}{points})')
+            seen.add(ev_type)
+    return delta, reasons
+
+
 def _normalise_lead(lead: dict, post_id: str = '') -> dict:
     if not isinstance(lead, dict):
         lead = {}
@@ -720,12 +817,18 @@ def _normalise_lead(lead: dict, post_id: str = '') -> dict:
     if not platform:
         platform = 'tiktok' if str(pid).startswith('tiktok_') else 'facebook'
     created_at = str(lead.get('created_at') or datetime.utcnow().isoformat(timespec='seconds') + 'Z')
-    score, reasons = _score_lead(lead, phone)
+    base_score, base_reasons = _score_lead(lead, phone)
+    behavior_delta, behavior_reasons = _behavior_score(lead)
+    score = max(-100, min(190, base_score + behavior_delta))
+    reasons = base_reasons + behavior_reasons
     level, level_label = _lead_level(score)
     lead_status = str(lead.get('lead_status') or lead.get('crm_status') or 'new').strip() or 'new'
     sla_due_at = str(lead.get('sla_due_at') or _lead_due_at(created_at, level))
     alert_level, alert_label = _lead_alert(level, lead_status, sla_due_at)
     next_action = str(lead.get('next_action') or _lead_next_action(level, phone)).strip()
+    modules = _classify_lead_modules({**lead, 'phone': phone, 'phones': phones})
+    behavior_events = lead.get('behavior_events') if isinstance(lead.get('behavior_events'), list) else []
+    status_history = lead.get('status_history') if isinstance(lead.get('status_history'), list) else []
     return {
         **lead,
         'lead_key': str(lead.get('lead_key') or _lead_key({**lead, 'post_id': pid, 'phone': phone})),
@@ -743,6 +846,12 @@ def _normalise_lead(lead: dict, post_id: str = '') -> dict:
         'need': str(lead.get('need') or lead.get('customer_need') or lead.get('evidence') or '').strip(),
         'intent': str(lead.get('intent') or 'phone_comment').strip(),
         'product_or_service': str(lead.get('product_or_service') or '').strip(),
+        'platform_tags': modules['platform_tags'],
+        'business_module': modules['business_module'],
+        'business_modules': modules['business_modules'],
+        'industry_module': modules['industry_module'],
+        'industry_modules': modules['industry_modules'],
+        'matched_keywords': modules['matched_keywords'],
         'location': str(lead.get('location') or '').strip(),
         'budget': str(lead.get('budget') or '').strip(),
         'urgency': str(lead.get('urgency') or 'medium').strip(),
@@ -761,6 +870,8 @@ def _normalise_lead(lead: dict, post_id: str = '') -> dict:
         'alert_level': alert_level,
         'alert_label': alert_label,
         'next_action': next_action,
+        'behavior_events': behavior_events,
+        'status_history': status_history,
         'created_at': created_at,
     }
 
@@ -823,6 +934,12 @@ def _lead_to_supabase_row(lead: dict) -> dict:
         'sla_due_at': row.get('sla_due_at') or None,
         'alert_level': row.get('alert_level') or '',
         'next_action': row.get('next_action') or '',
+        'platform_tags': row.get('platform_tags') or [],
+        'business_module': row.get('business_module') or '',
+        'industry_module': row.get('industry_module') or '',
+        'matched_keywords': row.get('matched_keywords') or [],
+        'behavior_events': row.get('behavior_events') or [],
+        'status_history': row.get('status_history') or [],
         'raw_lead': row,
         'created_by_staff_id': staff.get('id', ''),
         'created_by_staff_name': staff.get('name', ''),
@@ -855,6 +972,8 @@ def _save_leads_to_supabase(leads: list[dict]) -> tuple[bool, str]:
         'lead_score', 'score_reasons', 'lead_level', 'lead_status',
         'assigned_sale_id', 'assigned_sale_name', 'sla_minutes', 'sla_due_at',
         'alert_level', 'next_action',
+        'platform_tags', 'business_module', 'industry_module', 'matched_keywords',
+        'behavior_events', 'status_history',
     }
 
     def post_chunk(chunk: list[dict]):
@@ -966,6 +1085,189 @@ def _flatten_lead_groups(grouped: dict) -> list[dict]:
     return rows
 
 
+# ── Chia lead cho Sale (đặc tả Bước 6/7) ──
+_assign_lock = threading.Lock()
+_assign_cursor = 0
+
+
+def _sale_roster() -> list[dict]:
+    """Danh sách nhân sự sale đủ điều kiện nhận lead (đang bật)."""
+    roster = []
+    for item in _staff_accounts():
+        if not item.get('enabled', True):
+            continue
+        roster.append({
+            'id': str(item.get('id') or ''),
+            'name': str(item.get('name') or item.get('username') or 'Sale'),
+            'role': str(item.get('role') or 'staff'),
+        })
+    return roster
+
+
+def _auto_assign_sale(lead: dict) -> dict:
+    """Tự động chia lead cho sale theo round-robin nếu chưa có sale phụ trách."""
+    if str(lead.get('assigned_sale_id') or '').strip() or str(lead.get('assigned_sale_name') or '').strip():
+        return lead
+    roster = _sale_roster()
+    if not roster:
+        return lead
+    global _assign_cursor
+    with _assign_lock:
+        sale = roster[_assign_cursor % len(roster)]
+        _assign_cursor += 1
+    lead['assigned_sale_id'] = sale['id']
+    lead['assigned_sale_name'] = sale['name']
+    return lead
+
+
+def _pick_other_sale(current_sale_id: str) -> dict:
+    """Chọn một sale khác sale hiện tại để escalation."""
+    roster = _sale_roster()
+    others = [s for s in roster if s['id'] != str(current_sale_id or '')]
+    pool = others or roster
+    if not pool:
+        return {}
+    global _assign_cursor
+    with _assign_lock:
+        sale = pool[_assign_cursor % len(pool)]
+        _assign_cursor += 1
+    return sale
+
+
+def _append_status_history(lead: dict, status: str, note: str = '', by: str = '') -> list:
+    """Ghi timeline thay đổi trạng thái lead (đặc tả Bước 7)."""
+    history = lead.get('status_history') if isinstance(lead.get('status_history'), list) else []
+    if history and history[-1].get('status') == status and not note:
+        return history
+    history = [*history, {
+        'status': status,
+        'note': note,
+        'by': by,
+        'at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+    }]
+    lead['status_history'] = history
+    return history
+
+
+def _postprocess_new_leads(leads: list[dict], posts_by_id: dict | None = None) -> list[dict]:
+    """Áp dụng chia sale tự động + thông báo lead nóng + auto-comment cho lead vừa tạo (đặc tả Bước 6/7/4)."""
+    auto_assign = _settings.get('auto_assign_sale', True)
+    notify_hot = _settings.get('notify_hot_lead', True)
+    auto_comment = _settings.get('auto_comment_hot', False)
+    posts_by_id = posts_by_id or {}
+    processed: list[dict] = []
+    for lead in leads or []:
+        if not isinstance(lead, dict):
+            continue
+        if auto_assign:
+            _auto_assign_sale(lead)
+            # gắn trạng thái khởi tạo vào timeline nếu chưa có
+            if not lead.get('status_history'):
+                _append_status_history(lead, str(lead.get('lead_status') or 'new'), note='Lead được tạo', by='system')
+        normalised = _normalise_lead(lead, lead.get('post_id') or '')
+        processed.append(normalised)
+        if notify_hot and normalised.get('lead_level') in ('hot', 'very_hot'):
+            threading.Thread(target=_notify_hot_lead, args=(normalised,), daemon=True).start()
+        if auto_comment and normalised.get('lead_level') in ('hot', 'very_hot'):
+            post = posts_by_id.get(str(normalised.get('post_id') or ''))
+            threading.Thread(target=_auto_comment_lead, args=(normalised, post), daemon=True).start()
+    return processed
+
+
+# ── Bot auto-comment cho lead nóng (đặc tả Bước 4) ──
+# Thiết kế an toàn: chỉ chạy khi bật thủ công, chỉ lead nóng/rất nóng,
+# có giới hạn số comment/giờ để giảm rủi ro khóa tài khoản Facebook.
+_auto_comment_lock = threading.Lock()
+_auto_comment_times: list = []   # epoch các lần auto comment gần đây
+_auto_commented_keys: set = set()  # lead_key đã auto comment để tránh trùng
+
+
+def _auto_comment_quota_ok() -> bool:
+    limit = int(_settings.get('auto_comment_max_per_hour', 8) or 8)
+    now = _time.time()
+    with _auto_comment_lock:
+        cutoff = now - 3600
+        _auto_comment_times[:] = [t for t in _auto_comment_times if t >= cutoff]
+        return len(_auto_comment_times) < limit
+
+
+def _auto_comment_record_time():
+    with _auto_comment_lock:
+        _auto_comment_times.append(_time.time())
+
+
+def _build_auto_comment_message(lead: dict, post: dict | None = None) -> str:
+    """Tạo nội dung comment: ưu tiên gợi ý AI nếu có ngữ cảnh bài, nếu không dùng mẫu từ hồ sơ bán hàng."""
+    phone = str((_business_profile or {}).get('phone') or '').strip()
+    if post:
+        try:
+            classifier = _get_classifier()
+            if classifier.api_key:
+                suggestion = classifier.suggest_reply(post, '', _business_profile)
+                replies = suggestion.get('suggested_replies') or []
+                if phone:
+                    for r in replies:
+                        if phone in str(r.get('text') or ''):
+                            return str(r.get('text') or '').strip()
+                for r in replies:
+                    label = str(r.get('label') or '').lower()
+                    if 'chốt' in label or 'inbox' in label:
+                        return str(r.get('text') or '').strip()
+                if replies:
+                    return str(replies[0].get('text') or '').strip()
+        except Exception:
+            pass
+    # Mẫu dự phòng khi không có ngữ cảnh/AI
+    biz = str((_business_profile or {}).get('business_name') or 'F-Solution').strip()
+    need = str(lead.get('need') or '').strip()
+    name = str(lead.get('name') or '').strip()
+    greeting = f'Chào anh/chị {name}, ' if name and name != 'Ẩn danh' else 'Chào anh/chị, '
+    body = f'{biz} có thể hỗ trợ {need} ạ. ' if need else f'{biz} có thể hỗ trợ nhu cầu của anh/chị ạ. '
+    cta = 'Anh/chị inbox giúp em để được tư vấn nhanh nhé.'
+    if phone:
+        cta += f' Hoặc liên hệ {phone}.'
+    return (greeting + body + cta).strip()
+
+
+def _auto_comment_lead(lead: dict, post: dict | None = None, force: bool = False) -> tuple[bool, str]:
+    """Đăng comment tự động cho 1 lead nóng/rất nóng. Trả về (ok, comment_id|error)."""
+    level = str(lead.get('lead_level') or '')
+    if not force and level not in ('hot', 'very_hot'):
+        return False, 'Chỉ auto comment với lead nóng/rất nóng'
+    if str(lead.get('platform') or 'facebook') != 'facebook':
+        return False, 'Hiện chỉ hỗ trợ auto comment trên Facebook'
+    post_id = str(lead.get('post_id') or '')
+    if not post_id:
+        return False, 'Lead thiếu post_id để comment'
+    key = str(lead.get('lead_key') or '')
+    if key and key in _auto_commented_keys and not force:
+        return False, 'Lead này đã được auto comment'
+    if not _auto_comment_quota_ok():
+        return False, 'Đã đạt giới hạn auto comment trong 1 giờ'
+    message = _build_auto_comment_message(lead, post)
+    if not message:
+        return False, 'Chưa tạo được nội dung comment'
+    group_id = str(lead.get('group_id') or DEFAULT_GROUP)
+    post_url = str(lead.get('post_url') or '')
+    try:
+        result = get_api(group_id).post_comment(post_id, message)
+    except Exception as e:
+        _record_comment_log(post_id, group_id, post_url, message, '', 'failed', error_message=str(e))
+        return False, str(e)
+    if result and 'id' in result:
+        _record_comment_log(post_id, group_id, post_url, message, '', 'success', comment_id=result['id'])
+        _auto_comment_record_time()
+        if key:
+            _auto_commented_keys.add(key)
+            # ghi vào timeline + đánh dấu đã liên hệ tự động
+            _append_status_history(lead, str(lead.get('lead_status') or 'new'), note=f'Bot auto comment: {message[:80]}', by='bot')
+            _update_lead_in_memory(key, {'status_history': lead.get('status_history')})
+        return True, result['id']
+    err = (result or {}).get('error', {}).get('message', 'Lỗi không xác định')
+    _record_comment_log(post_id, group_id, post_url, message, '', 'failed', error_message=err)
+    return False, err
+
+
 def _lead_dashboard_payload(grouped: dict) -> dict:
     rows = _flatten_lead_groups(grouped)
     total = len(rows)
@@ -973,13 +1275,19 @@ def _lead_dashboard_payload(grouped: dict) -> dict:
     by_status: dict[str, int] = {}
     by_group: dict[str, int] = {}
     by_platform: dict[str, int] = {}
+    by_sale: dict[str, int] = {}
+    by_industry: dict[str, int] = {}
     overdue = 0
     hot = 0
     very_hot = 0
+    new_count = 0
     contacted = 0
+    responded = 0
     demo = 0
     quoted = 0
     won = 0
+    lost = 0
+    spam = 0
     auto_comment_candidates = 0
     scores: list[int] = []
 
@@ -988,26 +1296,38 @@ def _lead_dashboard_payload(grouped: dict) -> dict:
         status = str(lead.get('lead_status') or 'new')
         platform = str(lead.get('platform') or 'unknown')
         group_id = str(lead.get('group_id') or 'unknown')
+        sale_name = str(lead.get('assigned_sale_name') or '').strip() or 'Chưa chia'
+        industry = str(lead.get('industry_module') or '').strip() or 'Khác'
         score = int(lead.get('lead_score') or 0)
         scores.append(score)
         by_level[level] = by_level.get(level, 0) + 1
         by_status[status] = by_status.get(status, 0) + 1
         by_group[group_id] = by_group.get(group_id, 0) + 1
         by_platform[platform] = by_platform.get(platform, 0) + 1
+        by_sale[sale_name] = by_sale.get(sale_name, 0) + 1
+        by_industry[industry] = by_industry.get(industry, 0) + 1
         if level in ('hot', 'very_hot'):
             hot += 1
         if level == 'very_hot':
             very_hot += 1
         if str(lead.get('alert_level') or '') in ('red', 'orange'):
             overdue += 1
+        if status == 'new':
+            new_count += 1
         if status in ('contacted', 'consulting', 'demo', 'quoted', 'won', 'lost'):
             contacted += 1
+        if status in ('consulting', 'demo', 'quoted', 'won'):
+            responded += 1
         if status == 'demo':
             demo += 1
         if status == 'quoted':
             quoted += 1
         if status == 'won':
             won += 1
+        if status == 'lost':
+            lost += 1
+        if score <= -50 or 'spam' in ' '.join(str(r).lower() for r in (lead.get('score_reasons') or [])):
+            spam += 1
         if level in ('hot', 'very_hot'):
             auto_comment_candidates += 1
 
@@ -1016,13 +1336,20 @@ def _lead_dashboard_payload(grouped: dict) -> dict:
 
     return {
         'total': total,
+        'new_count': new_count,
         'hot_count': hot,
         'very_hot_count': very_hot,
         'overdue_count': overdue,
+        'spam_count': spam,
+        'won_count': won,
+        'lost_count': lost,
+        'scanned_today': _count_scanned_today(),
         'avg_score': round(sum(scores) / len(scores), 1) if scores else 0,
         'by_level': by_level,
         'by_status': by_status,
         'by_platform': by_platform,
+        'by_sale': by_sale,
+        'by_industry': by_industry,
         'top_groups': sorted(
             [{'group_id': key, 'count': value} for key, value in by_group.items()],
             key=lambda item: item['count'],
@@ -1031,9 +1358,11 @@ def _lead_dashboard_payload(grouped: dict) -> dict:
         'rates': {
             'hot_rate': pct_value(hot),
             'contacted_rate': pct_value(contacted),
+            'response_rate': pct_value(responded),
             'demo_rate': pct_value(demo),
             'quoted_rate': pct_value(quoted),
             'won_rate': pct_value(won),
+            'spam_rate': pct_value(spam),
             'auto_comment_candidate_rate': pct_value(auto_comment_candidates),
         },
     }
@@ -1068,6 +1397,12 @@ def _patch_lead_in_supabase(lead_key: str, row: dict) -> tuple[bool, str]:
         'sla_due_at': row.get('sla_due_at') or None,
         'alert_level': row.get('alert_level') or '',
         'next_action': row.get('next_action') or '',
+        'platform_tags': row.get('platform_tags') or [],
+        'business_module': row.get('business_module') or '',
+        'industry_module': row.get('industry_module') or '',
+        'matched_keywords': row.get('matched_keywords') or [],
+        'behavior_events': row.get('behavior_events') or [],
+        'status_history': row.get('status_history') or [],
         'raw_lead': row,
         'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
     }
@@ -1421,7 +1756,7 @@ def _current_staff_id() -> str:
 
 
 def _is_admin() -> bool:
-    return _current_staff().get('role') == 'admin'
+    return str(_current_staff().get('role') or '').strip().lower() == 'admin'
 
 
 def _public_current_staff() -> dict:
@@ -1458,6 +1793,22 @@ def _invalidate_facebook_cache():
     _pages_cache.clear()
 
 
+def _remove_staff_token_file(staff_id: str) -> None:
+    try:
+        os.remove(_staff_token_file(staff_id))
+    except OSError:
+        pass
+
+
+def _refresh_staff_session_cache(staff_id: str, staff_row: dict) -> None:
+    """Nếu đang sửa chính tài khoản đăng nhập, cập nhật ngay cookie trong session cache."""
+    if not staff_id or session.get('staff_id') != staff_id:
+        return
+    token = session.get('staff_cache_token', '')
+    if token:
+        _session_staff_cache[token] = {**staff_row, '_auth_source': session.get('staff_source', 'local') or 'local'}
+
+
 def _clean_business_profile(body: dict) -> dict:
     current = {**_default_business_profile(), **(_business_profile or {})}
     limits = {
@@ -1490,6 +1841,21 @@ def _extract_target_id_from_link(link: str) -> str:
             return match.group(1).strip('/')
     nums = re.findall(r'\d{6,}', link)
     return nums[-1] if nums else ''
+
+
+def _is_valid_facebook_numeric_id(value: str) -> bool:
+    return bool(re.fullmatch(r'\d{10,20}', str(value or '').strip()))
+
+
+def _facebook_channel_validation_error(row: dict) -> str:
+    platform = str(row.get('platform') or '').strip().lower()
+    channel_type = str(row.get('channel_type') or '').strip().lower()
+    target_id = str(row.get('target_id') or '').strip()
+    if platform != 'facebook':
+        return ''
+    if channel_type in ('nhóm', 'nhom', 'group', 'page', 'fanpage') and target_id and not _is_valid_facebook_numeric_id(target_id):
+        return 'ID Facebook chưa hợp lệ. Hãy nhập ID số thật của Group/Page (10-20 chữ số), không nhập tên như "page" hoặc ID ngắn như "1".'
+    return ''
 
 
 def _normalize_channel_type(value: str) -> str:
@@ -2555,6 +2921,30 @@ def _today_utc_bounds() -> tuple[datetime, datetime]:
     return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
 
 
+def _today_local_key() -> str:
+    try:
+        tz = ZoneInfo(APP_TIMEZONE)
+    except Exception:
+        tz = ZoneInfo('Asia/Ho_Chi_Minh')
+    return datetime.now(tz).date().isoformat()
+
+
+def _track_scanned(count: int) -> None:
+    """Cộng số bài đã quét trong ngày để phục vụ KPI dashboard."""
+    if count <= 0:
+        return
+    key = _today_local_key()
+    _scan_counter[key] = _scan_counter.get(key, 0) + count
+    # Giữ tối đa 14 ngày gần nhất để tránh phình bộ nhớ
+    if len(_scan_counter) > 14:
+        for old_key in sorted(_scan_counter.keys())[:-14]:
+            _scan_counter.pop(old_key, None)
+
+
+def _count_scanned_today() -> int:
+    return int(_scan_counter.get(_today_local_key(), 0))
+
+
 def _parse_log_time(value: str) -> datetime | None:
     if not value:
         return None
@@ -2682,6 +3072,60 @@ def _notify_new_post(post: dict):
         _tg_send(cid, msg)
 
 
+def _tg_broadcast(msg: str):
+    """Gửi message tới toàn bộ chat id đã đăng ký."""
+    for cid in _tg_chat_ids:
+        _tg_send(cid, msg)
+
+
+def _lead_link(lead: dict) -> str:
+    return str(lead.get('comment_url') or lead.get('post_url') or '').strip()
+
+
+def _notify_hot_lead(lead: dict):
+    """Thông báo Telegram khi có lead nóng/rất nóng (đặc tả Bước 7)."""
+    if not _tg_chat_ids:
+        return
+    level = str(lead.get('lead_level') or '')
+    if level not in ('hot', 'very_hot'):
+        return
+    icon = '🔴🔥' if level == 'very_hot' else '🟠🔥'
+    label = lead.get('lead_level_label') or ('Lead rất nóng' if level == 'very_hot' else 'Lead nóng')
+    sla = _lead_sla_minutes(level)
+    assigned = lead.get('assigned_sale_name') or 'Chưa chia'
+    link = _lead_link(lead)
+    msg = (
+        f"{icon} *{label}* — {lead.get('lead_score', 0)} điểm\n\n"
+        f"👤 *{lead.get('name') or 'Ẩn danh'}*\n"
+        f"📝 {(lead.get('need') or lead.get('evidence') or '')[:280]}\n"
+        f"📞 {lead.get('phone') or 'Chưa có SĐT'}\n"
+        f"🧑‍💼 Sale: {assigned}\n"
+        f"⏱ SLA: {sla} phút\n"
+    )
+    if link:
+        msg += f"\n[🔗 Mở bài/bình luận]({link})"
+    _tg_broadcast(msg)
+
+
+def _notify_sla_escalation(lead: dict, reason: str):
+    """Cảnh báo escalation khi lead quá hạn SLA (đặc tả Bước 7)."""
+    if not _tg_chat_ids:
+        return
+    label = lead.get('lead_level_label') or lead.get('lead_level') or 'Lead'
+    assigned = lead.get('assigned_sale_name') or 'Chưa chia'
+    link = _lead_link(lead)
+    msg = (
+        f"⚠️ *CẢNH BÁO SLA* — {reason}\n\n"
+        f"👤 *{lead.get('name') or 'Ẩn danh'}* ({label}, {lead.get('lead_score', 0)} điểm)\n"
+        f"📞 {lead.get('phone') or 'Chưa có SĐT'}\n"
+        f"🧑‍💼 Sale phụ trách: {assigned}\n"
+        f"📌 Trạng thái: {lead.get('lead_status') or 'new'}\n"
+    )
+    if link:
+        msg += f"\n[🔗 Mở lead]({link})"
+    _tg_broadcast(msg)
+
+
 def _poll_telegram():
     if not BOT_TOKEN:
         return
@@ -2708,6 +3152,163 @@ def _poll_telegram():
             pass
 
 
+# Lưu các lead đã escalation để không báo trùng: {lead_key: 'overdue'}
+_escalated_leads: dict = {}
+
+
+def _sla_monitor_tick():
+    """Quét các lead chưa xử lý, escalation khi quá SLA (đặc tả Bước 7).
+
+    - Lead nóng/rất nóng quá hạn: chuyển sang sale khác + báo giám đốc (toàn bộ chat id).
+    - Chỉ áp dụng cho lead còn ở trạng thái chưa liên hệ (new/assigned).
+    """
+    try:
+        grouped, _warning = _load_leads_from_supabase()
+        rows = _flatten_lead_groups(grouped or _leads)
+    except Exception:
+        rows = _flatten_lead_groups(_leads)
+
+    now = datetime.now(timezone.utc)
+    for lead in rows:
+        status = str(lead.get('lead_status') or 'new')
+        if status not in ('new', 'assigned', 'not_contacted', ''):
+            _escalated_leads.pop(str(lead.get('lead_key') or ''), None)
+            continue
+        due = _parse_dt(str(lead.get('sla_due_at') or ''))
+        if not due:
+            continue
+        overdue = (now - due.astimezone(timezone.utc)).total_seconds() > 0
+        if not overdue:
+            continue
+        key = str(lead.get('lead_key') or '')
+        if _escalated_leads.get(key) == 'overdue':
+            continue  # đã escalation rồi
+
+        level = str(lead.get('lead_level') or '')
+        reason = f"Quá SLA {lead.get('sla_minutes', 0)} phút chưa đổi trạng thái"
+        # Lead nóng/rất nóng: tự chuyển sang sale khác
+        if level in ('hot', 'very_hot'):
+            other = _pick_other_sale(str(lead.get('assigned_sale_id') or ''))
+            if other and other.get('id') != str(lead.get('assigned_sale_id') or ''):
+                lead['assigned_sale_id'] = other['id']
+                lead['assigned_sale_name'] = other['name']
+                _append_status_history(lead, status, note=f'Chuyển sale do quá SLA → {other["name"]}', by='system')
+                updated = _normalise_lead({**lead, 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}, lead.get('post_id') or '')
+                _update_lead_in_memory(key, {
+                    'assigned_sale_id': updated.get('assigned_sale_id'),
+                    'assigned_sale_name': updated.get('assigned_sale_name'),
+                    'status_history': updated.get('status_history'),
+                })
+                _patch_lead_in_supabase(key, updated)
+                reason += f"; đã chuyển cho {other['name']}"
+        _notify_sla_escalation(lead, reason)
+        _escalated_leads[key] = 'overdue'
+
+
+def _sla_monitor_loop():
+    """Vòng lặp nền kiểm tra SLA mỗi phút."""
+    while True:
+        try:
+            if _settings.get('sla_monitor', True):
+                _sla_monitor_tick()
+        except Exception as e:
+            print(f'[sla] monitor error: {e}')
+        _time.sleep(60)
+
+
+# ── Scheduler quét bài tự động phía server (đặc tả Bước 1) ──
+_last_auto_scan_at: dict = {'value': ''}
+
+
+def _scan_page_ids() -> list[str]:
+    """Lấy danh sách Page Facebook đã cấu hình để quét."""
+    ids = []
+    for row in _managed_channels:
+        platform = str(row.get('platform') or '').strip().lower()
+        channel_type = str(row.get('channel_type') or '').strip().lower()
+        target_id = str(row.get('target_id') or '').strip()
+        if platform == 'facebook' and channel_type in ('trang', 'page') and target_id:
+            ids.append(target_id)
+    return ids
+
+
+def _auto_scan_tick():
+    """Quét toàn bộ group/page đã cấu hình, tự phân loại và tách lead nếu được bật."""
+    group_ids = [g['id'] for g in _merged_facebook_groups() if g.get('id')]
+    page_ids = _scan_page_ids()
+    summary = {
+        'ok': True,
+        'group_count': len(group_ids),
+        'page_count': len(page_ids),
+        'post_count': 0,
+        'lead_count': 0,
+        'report': [],
+        'message': '',
+    }
+    if not group_ids and not page_ids:
+        summary['message'] = 'Chưa có group/page được cấu hình để quét.'
+        return summary
+    limit = int(_settings.get('interval_post_limit', 15) or 15)
+    all_posts, _report = _scan_targets(group_ids, page_ids, limit, notify=True)
+    summary['post_count'] = len(all_posts or [])
+    summary['report'] = _report or []
+    _last_auto_scan_at['value'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
+    summary['last_auto_scan_at'] = _last_auto_scan_at['value']
+    if not all_posts:
+        summary['message'] = 'Đã quét nhưng chưa lấy được bài mới từ các kênh.'
+        return summary
+
+    # Tự tách lead nếu bật auto_classify (dùng chung cấu hình AI)
+    if not _ai_config.get('auto_classify'):
+        summary['message'] = 'Đã quét bài. Chưa tách lead vì AI tự động đang tắt.'
+        return summary
+    classifier = _get_classifier()
+    if not classifier.api_key:
+        summary['message'] = 'Đã quét bài. Chưa tách lead vì chưa cấu hình API key AI.'
+        return summary
+    to_extract = [p for p in all_posts if p.get('id') and p.get('id') not in _leads]
+    if not to_extract:
+        summary['message'] = 'Đã quét bài. Không có bài mới cần tách lead.'
+        return summary
+    try:
+        results = classifier.extract_leads(to_extract)
+    except Exception as e:
+        print(f'[auto-scan] extract leads error: {e}')
+        summary['ok'] = False
+        summary['message'] = f'Lỗi tách lead AI: {e}'
+        return summary
+    posts_by_id = {str(p.get('id') or ''): p for p in to_extract}
+    lead_count = 0
+    for post in to_extract:
+        pid = post.get('id')
+        if pid:
+            processed = _postprocess_new_leads(
+                [_normalise_lead(item, pid) for item in results.get(pid, [])],
+                posts_by_id=posts_by_id,
+            )
+            _leads[pid] = processed
+            lead_count += len(processed)
+    _save_leads()
+    flat_leads = [lead for items in _leads.values() for lead in (items or []) if str(lead.get('post_id') or '') in posts_by_id]
+    _save_leads_to_supabase(flat_leads)
+    summary['lead_count'] = lead_count
+    summary['message'] = f'Đã quét {summary["post_count"]} bài và tách {lead_count} lead.'
+    return summary
+
+
+def _auto_scan_loop():
+    """Vòng lặp nền quét bài theo chu kỳ (mặc định 5 phút). Cần bật server_auto_scan."""
+    while True:
+        interval_min = 5
+        try:
+            interval_min = max(1, int(_settings.get('scan_interval_min', _settings.get('interval', 5)) or 5))
+            if _settings.get('server_auto_scan', False):
+                _auto_scan_tick()
+        except Exception as e:
+            print(f'[auto-scan] loop error: {e}')
+        _time.sleep(interval_min * 60)
+
+
 # ── Routes ─────────────────────────────────────────────
 @app.route('/')
 def index():
@@ -2726,6 +3327,7 @@ def auth_status():
         'setup_required': _setup_required(),
         'simple_login': SIMPLE_LOGIN_ONLY,
         'staff': staff,
+        'can_manage': _is_admin(),
     })
 
 
@@ -2743,7 +3345,7 @@ def auth_setup():
         if existing and _verify_password(password, existing.get('password_salt', ''), existing.get('password_hash', '')):
             _set_logged_in_staff(existing)
             _invalidate_facebook_cache()
-            return jsonify({'ok': True, 'already_setup': True, 'staff': _public_current_staff()})
+            return jsonify({'ok': True, 'already_setup': True, 'staff': _public_current_staff(), 'can_manage': _is_admin()})
         return jsonify({
             'ok': False,
             'already_setup': True,
@@ -2778,7 +3380,7 @@ def auth_setup():
     _save_staff_cookies()
     _set_logged_in_staff(_staff_cookies['staff'][0])
     _invalidate_facebook_cache()
-    return jsonify({'ok': True, 'staff': _public_current_staff()})
+    return jsonify({'ok': True, 'staff': _public_current_staff(), 'can_manage': _is_admin()})
 
 
 @app.route('/api/auth/login', methods=['POST'])
@@ -2793,7 +3395,7 @@ def auth_login():
     if staff and _verify_password(password, staff.get('password_salt', ''), staff.get('password_hash', '')):
         _set_logged_in_staff(staff)
         _invalidate_facebook_cache()
-        return jsonify({'ok': True, 'staff': _public_current_staff()})
+        return jsonify({'ok': True, 'staff': _public_current_staff(), 'can_manage': _is_admin()})
 
     row, supabase_error = _load_supabase_staff(username)
     if row:
@@ -2803,7 +3405,7 @@ def auth_login():
         if _supabase_password_matches(row, password):
             _set_logged_in_staff(supabase_staff)
             _invalidate_facebook_cache()
-            return jsonify({'ok': True, 'staff': _public_current_staff()})
+            return jsonify({'ok': True, 'staff': _public_current_staff(), 'can_manage': _is_admin()})
         return jsonify({'ok': False, 'error': 'Sai tài khoản hoặc mật khẩu'}), 401
 
     if supabase_error and 'Could not find the table' in supabase_error:
@@ -2824,81 +3426,124 @@ def auth_logout():
     return jsonify({'ok': True})
 
 
-@app.route('/api/posts')
-def api_posts():
-    global _seen_ids
-    limit = request.args.get('limit', 10, type=int)
-    group_ids = [g.strip() for g in request.args.get('groups', DEFAULT_GROUP).split(',') if g.strip()]
-    page_ids = [p.strip() for p in request.args.get('pages', '').split(',') if p.strip()]
-    debug = request.args.get('debug', '').lower() in ('1', 'true', 'yes')
-    is_first = len(_seen_ids) == 0
+def _scan_targets(group_ids: list[str], page_ids: list[str], limit: int = 10, notify: bool = True) -> tuple[list[dict], list[dict]]:
+    """Lõi quét bài dùng chung cho route /api/posts và scheduler nền.
 
-    try:
-        all_posts = []
-        report = []
-        for gid in group_ids:
-            posts = get_api(gid).get_posts(limit)
-            if posts is None:
-                report.append({
-                    'group_id': gid,
-                    'group_name': next((g.get('name') for g in _merged_facebook_groups() if g.get('id') == gid), gid),
-                    'ok': False,
-                    'count': 0,
-                    'source': 'facebook_graph',
-                    'error': 'Cookie hết hạn, chưa vào nhóm, hoặc Facebook không cho đọc feed nhóm này',
-                })
-                continue
-            for p in posts:
-                p['_group_id'] = gid
-                p['_source'] = 'facebook_graph'
-            all_posts.extend(posts)
+    Trả về (all_posts, report). Cập nhật _seen_ids, gửi thông báo bài mới, đếm bài quét.
+    """
+    global _seen_ids
+    is_first = len(_seen_ids) == 0
+    all_posts: list[dict] = []
+    report: list[dict] = []
+
+    for gid in group_ids:
+        posts = get_api(gid).get_posts(limit)
+        if posts is None:
             report.append({
                 'group_id': gid,
-                'target_type': 'group',
-                'target_id': gid,
                 'group_name': next((g.get('name') for g in _merged_facebook_groups() if g.get('id') == gid), gid),
-                'ok': True,
-                'count': len(posts or []),
+                'ok': False,
+                'count': 0,
                 'source': 'facebook_graph',
-                'error': '',
+                'error': 'Cookie hết hạn, chưa vào nhóm, hoặc Facebook không cho đọc feed nhóm này',
             })
+            continue
+        for p in posts:
+            p['_group_id'] = gid
+            p['_source'] = 'facebook_graph'
+        all_posts.extend(posts)
+        report.append({
+            'group_id': gid,
+            'target_type': 'group',
+            'target_id': gid,
+            'group_name': next((g.get('name') for g in _merged_facebook_groups() if g.get('id') == gid), gid),
+            'ok': True,
+            'count': len(posts or []),
+            'source': 'facebook_graph',
+            'error': '',
+        })
 
-        for page_id in page_ids:
-            page_name = next((item.get('channel_name') for item in _managed_channels if str(item.get('target_id') or '') == page_id), '')
-            try:
-                page_token = _page_token_from_cache(page_id)
-                if not page_token:
-                    raise RuntimeError('Không lấy được Page token')
-                posts = get_api(DEFAULT_GROUP).get_page_posts(page_id, page_token, limit)
-            except Exception:
-                posts = None
-            if posts is None:
-                report.append({
-                    'group_id': page_id,
-                    'target_type': 'page',
-                    'target_id': page_id,
-                    'group_name': page_name or page_id,
-                    'ok': False,
-                    'count': 0,
-                    'source': 'facebook_page_graph',
-                    'error': 'Không đọc được bài từ Page. Kiểm tra quyền quản trị Page và cookie.',
-                })
-                continue
-            for p in posts:
-                p['_page_id'] = page_id
-                p['_page_name'] = page_name or (_pages_cache.get(page_id) or {}).get('name') or page_id
-                p['_source'] = 'facebook_page_graph'
-            all_posts.extend(posts)
+    for page_id in page_ids:
+        page_name = next((item.get('channel_name') for item in _managed_channels if str(item.get('target_id') or '') == page_id), '')
+        try:
+            page_token = _page_token_from_cache(page_id)
+            if not page_token:
+                raise RuntimeError('Không lấy được Page token')
+            posts = get_api(DEFAULT_GROUP).get_page_posts(page_id, page_token, limit)
+        except Exception:
+            posts = None
+        if posts is None:
             report.append({
                 'group_id': page_id,
                 'target_type': 'page',
                 'target_id': page_id,
-                'group_name': page_name or (_pages_cache.get(page_id) or {}).get('name') or page_id,
-                'ok': True,
-                'count': len(posts or []),
+                'group_name': page_name or page_id,
+                'ok': False,
+                'count': 0,
                 'source': 'facebook_page_graph',
-                'error': '',
+                'error': 'Không đọc được bài từ Page. Kiểm tra quyền quản trị Page và cookie.',
             })
+            continue
+        for p in posts:
+            p['_page_id'] = page_id
+            p['_page_name'] = page_name or (_pages_cache.get(page_id) or {}).get('name') or page_id
+            p['_source'] = 'facebook_page_graph'
+        all_posts.extend(posts)
+        report.append({
+            'group_id': page_id,
+            'target_type': 'page',
+            'target_id': page_id,
+            'group_name': page_name or (_pages_cache.get(page_id) or {}).get('name') or page_id,
+            'ok': True,
+            'count': len(posts or []),
+            'source': 'facebook_page_graph',
+            'error': '',
+        })
+
+    all_posts.sort(key=lambda x: x.get('created_time', ''), reverse=True)
+
+    new_ids = set()
+    new_posts = []
+    for post in all_posts:
+        pid = post.get('id')
+        if pid and pid not in _seen_ids:
+            new_ids.add(pid)
+            new_posts.append(post)
+            if notify and not is_first:
+                threading.Thread(target=_notify_new_post, args=(post,), daemon=True).start()
+
+    if new_ids:
+        _seen_ids.update(new_ids)
+        _save_seen(new_posts)
+    _track_scanned(len(all_posts))
+    return all_posts, report
+
+
+@app.route('/api/posts')
+def api_posts():
+    limit = request.args.get('limit', 10, type=int)
+    group_ids = [g.strip() for g in request.args.get('groups', DEFAULT_GROUP).split(',') if g.strip()]
+    page_ids = [p.strip() for p in request.args.get('pages', '').split(',') if p.strip()]
+    debug = request.args.get('debug', '').lower() in ('1', 'true', 'yes')
+    invalid_group_ids = [gid for gid in group_ids if not _is_valid_facebook_numeric_id(gid)]
+    if invalid_group_ids:
+        return jsonify({
+            'error': 'Danh sách nhóm có ID không hợp lệ. Hãy xoá nhóm sai rồi thêm lại bằng ID số thật.',
+            'invalid_groups': invalid_group_ids,
+            'posts': [],
+            'report': [{
+                'group_id': gid,
+                'group_name': gid,
+                'ok': False,
+                'count': 0,
+                'source': 'facebook_graph',
+                'error': 'ID nhóm không hợp lệ',
+            } for gid in invalid_group_ids],
+            'source': 'facebook_graph',
+        }), 400
+
+    try:
+        all_posts, report = _scan_targets(group_ids, page_ids, limit)
 
         if (group_ids or page_ids) and not all_posts and any(not item.get('ok') for item in report):
             payload = {
@@ -2908,22 +3553,6 @@ def api_posts():
                 'source': 'facebook_graph',
             }
             return jsonify(payload), 401
-
-        all_posts.sort(key=lambda x: x.get('created_time', ''), reverse=True)
-
-        new_ids = set()
-        new_posts = []
-        for post in all_posts:
-            pid = post.get('id')
-            if pid and pid not in _seen_ids:
-                new_ids.add(pid)
-                new_posts.append(post)
-                if not is_first:
-                    threading.Thread(target=_notify_new_post, args=(post,), daemon=True).start()
-
-        if new_ids:
-            _seen_ids.update(new_ids)
-            _save_seen(new_posts)
 
         if debug:
             return jsonify({
@@ -3346,7 +3975,7 @@ def api_resolve_group():
         if data is None and not api.access_token:
             return jsonify({
                 'ok': False,
-                'error': 'Cookie/token Facebook hết hạn — cập nhật data/cookie.txt rồi restart server',
+                'error': 'Cookie/token Facebook hết hạn hoặc tài khoản đang đăng nhập chưa có cookie. Vào Nhân sự/Cooki, cập nhật cookie cho đúng tài khoản đang dùng rồi bấm Tải lại.',
             }), 401
         err = (data or {}).get('error', {}).get('message', 'Không tìm thấy group')
         return jsonify({'ok': False, 'error': err})
@@ -3368,7 +3997,7 @@ def _sync_group_from_channel(row: dict) -> None:
     platform = str(row.get('platform') or '').strip().lower()
     channel_type = str(row.get('channel_type') or '').strip().lower()
     target_id = str(row.get('target_id') or '').strip()
-    if platform != 'facebook' or channel_type not in ('nhóm', 'nhom', 'group') or not target_id:
+    if platform != 'facebook' or channel_type not in ('nhóm', 'nhom', 'group') or not _is_valid_facebook_numeric_id(target_id):
         return
     name = str(row.get('channel_name') or '').strip()
     if not any(g.get('id') == target_id for g in _groups):
@@ -3399,7 +4028,7 @@ def _facebook_group_channels() -> list[dict]:
         platform = str(row.get('platform') or '').strip().lower()
         channel_type = str(row.get('channel_type') or '').strip().lower()
         target_id = str(row.get('target_id') or '').strip()
-        if platform == 'facebook' and channel_type in ('nhóm', 'nhom', 'group') and target_id:
+        if platform == 'facebook' and channel_type in ('nhóm', 'nhom', 'group') and _is_valid_facebook_numeric_id(target_id):
             rows.append({'id': target_id, 'name': str(row.get('channel_name') or '').strip()})
     if changed:
         _managed_channels = next_channels
@@ -3411,7 +4040,7 @@ def _merged_facebook_groups() -> list[dict]:
     by_id = {}
     for row in _groups:
         gid = str(row.get('id') or '').strip()
-        if gid:
+        if _is_valid_facebook_numeric_id(gid):
             by_id[gid] = {'id': gid, 'name': str(row.get('name') or '').strip()}
     for row in _facebook_group_channels():
         gid = row['id']
@@ -3448,6 +4077,9 @@ def channels_create():
     body = request.get_json() or {}
     row = _clean_managed_channel(body)
     row = _resolve_facebook_group_channel(row)
+    validation_error = _facebook_channel_validation_error(row)
+    if validation_error:
+        return jsonify({'ok': False, 'error': validation_error}), 400
     if not row['platform']:
         return jsonify({'ok': False, 'error': 'Thiếu nền tảng'}), 400
     if not row['channel_name']:
@@ -3495,6 +4127,9 @@ def channels_update(channel_id):
     body = request.get_json() or {}
     row = {**current, **_clean_managed_channel(body, current), 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}
     row = _resolve_facebook_group_channel(row)
+    validation_error = _facebook_channel_validation_error(row)
+    if validation_error:
+        return jsonify({'ok': False, 'error': validation_error}), 400
     if not row.get('platform') or not row.get('channel_name'):
         return jsonify({'ok': False, 'error': 'Thiếu nền tảng hoặc tên kênh'}), 400
     if not row.get('target_id') and not row.get('link'):
@@ -3580,6 +4215,11 @@ def groups_add():
     name = body.get('name', '').strip()
     if not gid:
         return jsonify({'ok': False, 'error': 'Thiếu id'}), 400
+    if not _is_valid_facebook_numeric_id(gid):
+        return jsonify({
+            'ok': False,
+            'error': 'ID nhóm Facebook chưa hợp lệ. Hãy nhập link nhóm dạng facebook.com/groups/<ID số> hoặc ID nhóm thật 10-20 chữ số.',
+        }), 400
     if not any(g['id'] == gid for g in _groups):
         _groups.append({'id': gid, 'name': name})
     else:
@@ -3803,8 +4443,19 @@ def staff_cookies_update(staff_id):
             local_row['facebook_user_id'] = _extract_cookie_user(cookie)
         staff.append(local_row)
 
+    if cookie:
+        _remove_staff_token_file(staff_id)
+
     _save_staff_cookies()
     _invalidate_facebook_cache()
+    refreshed_staff = {
+        **target,
+        **remote_row,
+        'id': staff_id,
+        'cookie': cookie or target.get('cookie', ''),
+        'facebook_user_id': remote_row.get('facebook_user_id') or target.get('facebook_user_id', ''),
+    }
+    _refresh_staff_session_cache(staff_id, refreshed_staff)
     staff_rows, warning = _merged_public_staff_rows()
     if remote_warning and not warning:
         warning = remote_warning
@@ -3851,16 +4502,43 @@ def staff_cookies_delete(staff_id):
 
 @app.route('/api/settings', methods=['GET'])
 def settings_get():
-    return jsonify(_settings)
+    defaults = {
+        'auto_refresh': True,
+        'interval': 5,
+        'auto_assign_sale': True,
+        'notify_hot_lead': True,
+        'sla_monitor': True,
+        'auto_comment_hot': False,
+        'auto_comment_max_per_hour': 8,
+        'server_auto_scan': False,
+        'scan_interval_min': 5,
+    }
+    merged = {**defaults, **(_settings or {})}
+    merged['last_auto_scan_at'] = _last_auto_scan_at.get('value') or ''
+    merged['scanned_today'] = _count_scanned_today()
+    return jsonify(merged)
 
 
 @app.route('/api/settings', methods=['POST'])
 def settings_save():
     global _settings
     body = request.get_json() or {}
-    _settings.update({k: v for k, v in body.items() if k in ('auto_refresh', 'interval')})
+    allowed_keys = ('auto_refresh', 'interval', 'auto_assign_sale', 'notify_hot_lead', 'sla_monitor', 'auto_comment_hot', 'auto_comment_max_per_hour', 'server_auto_scan', 'scan_interval_min')
+    _settings.update({k: v for k, v in body.items() if k in allowed_keys})
     _save_settings()
     return jsonify({'ok': True, 'settings': _settings})
+
+
+@app.route('/api/automation/run-once', methods=['POST'])
+def automation_run_once():
+    """Chạy thử một vòng quét ngay để kiểm tra cấu hình trước khi bật nền."""
+    try:
+        result = _auto_scan_tick() or {'ok': True, 'message': 'Đã chạy xong.', 'post_count': 0, 'lead_count': 0}
+        result['scanned_today'] = _count_scanned_today()
+        result['last_auto_scan_at'] = _last_auto_scan_at.get('value') or result.get('last_auto_scan_at') or ''
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.route('/api/business-profile', methods=['GET'])
@@ -4069,11 +4747,30 @@ def lead_update(lead_key):
     remote, _warning = _load_leads_from_supabase()
     found = False
     updated = {}
+    source_lead = {}
     for item in _flatten_lead_groups(remote or _leads):
         if str(item.get('lead_key') or '') == str(lead_key):
-            updated = _normalise_lead({**item, **patch, 'lead_key': lead_key, 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}, item.get('post_id') or '')
-            found = True
+            source_lead = item
             break
+
+    # Ghi timeline nếu trạng thái thay đổi (đặc tả Bước 7)
+    if 'lead_status' in patch and source_lead:
+        old_status = str(source_lead.get('lead_status') or 'new')
+        new_status = str(patch.get('lead_status') or 'new')
+        if new_status != old_status:
+            staff = _current_staff()
+            history = _append_status_history(
+                source_lead,
+                new_status,
+                note=str(body.get('note') or ''),
+                by=staff.get('name', ''),
+            )
+            patch['status_history'] = history
+
+    if source_lead:
+        updated = _normalise_lead({**source_lead, **patch, 'lead_key': lead_key, 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}, source_lead.get('post_id') or '')
+        found = True
+
     if not found:
         found, updated = _update_lead_in_memory(str(lead_key), patch)
     else:
@@ -4088,9 +4785,113 @@ def lead_update(lead_key):
     return jsonify(payload)
 
 
-@app.route('/api/ai/reply-suggestions', methods=['GET'])
-def ai_reply_suggestions_get():
-    return jsonify(_reply_suggestions)
+@app.route('/api/leads/<lead_key>/event', methods=['POST'])
+def lead_add_event(lead_key):
+    """Ghi nhận hành vi khách (comment/inbox/demo/từ chối/spam...) để tính điểm động (đặc tả Mục III)."""
+    body = request.get_json() or {}
+    event_type = str(body.get('event') or body.get('type') or '').strip()
+    if event_type not in BEHAVIOR_SCORE_RULES:
+        valid = ', '.join(BEHAVIOR_SCORE_RULES.keys())
+        return jsonify({'ok': False, 'error': f'Sự kiện không hợp lệ. Hợp lệ: {valid}'}), 400
+
+    remote, _warning = _load_leads_from_supabase()
+    source_lead = {}
+    for item in _flatten_lead_groups(remote or _leads):
+        if str(item.get('lead_key') or '') == str(lead_key):
+            source_lead = item
+            break
+    if not source_lead:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy lead'}), 404
+
+    staff = _current_staff()
+    events = source_lead.get('behavior_events') if isinstance(source_lead.get('behavior_events'), list) else []
+    events = [*events, {
+        'type': event_type,
+        'note': str(body.get('note') or ''),
+        'by': staff.get('name', ''),
+        'at': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+    }]
+    prev_level = str(source_lead.get('lead_level') or '')
+    updated = _normalise_lead({**source_lead, 'behavior_events': events, 'lead_key': lead_key, 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}, source_lead.get('post_id') or '')
+    _update_lead_in_memory(str(lead_key), {'behavior_events': events})
+    supabase_ok, supabase_error = _patch_lead_in_supabase(str(lead_key), updated)
+
+    # Nếu vừa lên nóng/rất nóng thì thông báo
+    if updated.get('lead_level') in ('hot', 'very_hot') and updated.get('lead_level') != prev_level:
+        threading.Thread(target=_notify_hot_lead, args=(updated,), daemon=True).start()
+
+    payload = {'ok': True, 'lead': updated, 'storage': 'supabase' if supabase_ok else 'local'}
+    if supabase_error:
+        payload['warning'] = supabase_error
+    return jsonify(payload)
+
+
+@app.route('/api/sales/roster', methods=['GET'])
+def sales_roster_get():
+    """Danh sách sale có thể nhận lead (phục vụ chia lead)."""
+    return jsonify({'ok': True, 'sales': _sale_roster()})
+
+
+@app.route('/api/leads/<lead_key>/assign', methods=['POST'])
+def lead_assign(lead_key):
+    """Chia lead cho sale: nếu không truyền sale_id thì tự động round-robin."""
+    body = request.get_json() or {}
+    remote, _warning = _load_leads_from_supabase()
+    source_lead = {}
+    for item in _flatten_lead_groups(remote or _leads):
+        if str(item.get('lead_key') or '') == str(lead_key):
+            source_lead = item
+            break
+    if not source_lead:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy lead'}), 404
+
+    sale_id = str(body.get('sale_id') or '').strip()
+    if sale_id:
+        sale = next((s for s in _sale_roster() if s['id'] == sale_id), None)
+        if not sale:
+            return jsonify({'ok': False, 'error': 'Không tìm thấy sale'}), 404
+        source_lead['assigned_sale_id'] = sale['id']
+        source_lead['assigned_sale_name'] = sale['name']
+    else:
+        source_lead.pop('assigned_sale_id', None)
+        source_lead.pop('assigned_sale_name', None)
+        _auto_assign_sale(source_lead)
+
+    updated = _normalise_lead({**source_lead, 'lead_key': lead_key, 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}, source_lead.get('post_id') or '')
+    _update_lead_in_memory(str(lead_key), {
+        'assigned_sale_id': updated.get('assigned_sale_id'),
+        'assigned_sale_name': updated.get('assigned_sale_name'),
+    })
+    supabase_ok, supabase_error = _patch_lead_in_supabase(str(lead_key), updated)
+    payload = {'ok': True, 'lead': updated, 'storage': 'supabase' if supabase_ok else 'local'}
+    if supabase_error:
+        payload['warning'] = supabase_error
+    return jsonify(payload)
+
+
+@app.route('/api/leads/<lead_key>/auto-comment', methods=['POST'])
+def lead_auto_comment(lead_key):
+    """Bot đăng comment cho 1 lead (đặc tả Bước 4). Mặc định chỉ cho lead nóng/rất nóng.
+
+    Body tùy chọn: { "force": true } để bỏ qua giới hạn mức lead (vẫn giữ giới hạn quota/giờ).
+    """
+    body = request.get_json(silent=True) or {}
+    force = bool(body.get('force', False))
+    remote, _warning = _load_leads_from_supabase()
+    source_lead = {}
+    for item in _flatten_lead_groups(remote or _leads):
+        if str(item.get('lead_key') or '') == str(lead_key):
+            source_lead = item
+            break
+    if not source_lead:
+        return jsonify({'ok': False, 'error': 'Không tìm thấy lead'}), 404
+
+    ok, result = _auto_comment_lead(source_lead, post=None, force=force)
+    if not ok:
+        return jsonify({'ok': False, 'error': result}), 400
+    updated = _normalise_lead({**source_lead, 'lead_key': lead_key, 'updated_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'}, source_lead.get('post_id') or '')
+    _patch_lead_in_supabase(str(lead_key), updated)
+    return jsonify({'ok': True, 'comment_id': result, 'lead': updated})
 
 
 @app.route('/api/ai/comment-summaries', methods=['GET'])
@@ -4203,7 +5004,10 @@ def ai_extract_leads():
         for post in to_extract:
             pid = post.get('id')
             if pid:
-                _leads[pid] = [_normalise_lead(item, pid) for item in results.get(pid, [])]
+                _leads[pid] = _postprocess_new_leads(
+                    [_normalise_lead(item, pid) for item in results.get(pid, [])],
+                    posts_by_id={str(p.get('id') or ''): p for p in to_extract},
+                )
         _save_leads()
         flat_leads = [lead for items in _leads.values() for lead in (items or []) if str(lead.get('post_id') or '') in {str(p.get('id') or '') for p in to_extract}]
         supabase_ok, supabase_error = _save_leads_to_supabase(flat_leads)
@@ -4225,6 +5029,7 @@ def leads_from_comments():
     post_id = str((request.get_json(silent=True) or {}).get('post_id') or request.args.get('post_id') or '').strip()
     rows, warning = _load_post_comment_rows(source=source, post_id=post_id, limit=5000)
     leads = _comment_rows_to_phone_leads(rows)
+    leads = _postprocess_new_leads(leads)
     changed = _merge_leads_into_memory(leads)
     supabase_ok, supabase_error = _save_leads_to_supabase(leads)
     grouped = {}
@@ -4450,6 +5255,8 @@ def saved_posts():
 # ── Start ──────────────────────────────────────────────
 _load_state()
 threading.Thread(target=_poll_telegram, daemon=True).start()
+threading.Thread(target=_sla_monitor_loop, daemon=True).start()
+threading.Thread(target=_auto_scan_loop, daemon=True).start()
 
 if __name__ == '__main__':
     print(f'[server] supabase={"on" if USE_SUPABASE else "off"} | http://localhost:{PORT}')

@@ -59,6 +59,15 @@ alter table public.leads
   add column if not exists alert_level text,
   add column if not exists next_action text;
 
+-- Lead Hunter v1.0: phân loại module + điểm động + timeline xử lý
+alter table public.leads
+  add column if not exists platform_tags jsonb not null default '[]'::jsonb,
+  add column if not exists business_module text,
+  add column if not exists industry_module text,
+  add column if not exists matched_keywords jsonb not null default '[]'::jsonb,
+  add column if not exists behavior_events jsonb not null default '[]'::jsonb,
+  add column if not exists status_history jsonb not null default '[]'::jsonb;
+
 create index if not exists leads_post_id_idx
   on public.leads (post_id);
 

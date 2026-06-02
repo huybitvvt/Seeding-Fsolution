@@ -84,6 +84,12 @@ export type Lead = {
   comment_id?: string;
   comment_url?: string;
   product_or_service?: string;
+  platform_tags?: string[];
+  business_module?: string;
+  business_modules?: string[];
+  industry_module?: string;
+  industry_modules?: string[];
+  matched_keywords?: string[];
   location?: string;
   budget?: string;
   intent?: string;
@@ -103,19 +109,34 @@ export type Lead = {
   alert_level?: 'none' | 'ok' | 'orange' | 'red' | string;
   alert_label?: string;
   next_action?: string;
+  behavior_events?: { type?: string; note?: string; by?: string; at?: string }[];
+  status_history?: { status?: string; note?: string; by?: string; at?: string }[];
   created_at?: string;
   updated_at?: string;
 };
 
+export type SaleStaff = {
+  id: string;
+  name: string;
+  role?: string;
+};
+
 export type LeadDashboard = {
   total?: number;
+  new_count?: number;
   hot_count?: number;
   very_hot_count?: number;
   overdue_count?: number;
+  spam_count?: number;
+  won_count?: number;
+  lost_count?: number;
+  scanned_today?: number;
   avg_score?: number;
   by_level?: Record<string, number>;
   by_status?: Record<string, number>;
   by_platform?: Record<string, number>;
+  by_sale?: Record<string, number>;
+  by_industry?: Record<string, number>;
   top_groups?: { group_id?: string; count?: number }[];
   rates?: Record<string, number>;
 };
